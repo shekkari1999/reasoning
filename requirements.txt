@@ -1,0 +1,9 @@
+# Core
+transformers
+accelerate
+ipykernel
+
+# Optional: uncomment if you need these
+# torch
+# jupyter
+# tqdm
