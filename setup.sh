@@ -63,6 +63,30 @@ maybe_init_project() {
   fi
 }
 
+configure_git_identity() {
+  # This sets git identity (name/email) only.
+  # For authentication to GitHub/GitLab, use SSH keys or a PAT via pod secrets/env.
+  if ! have git; then
+    return 0
+  fi
+
+  local name="${GIT_USER_NAME:-}"
+  local email="${GIT_USER_EMAIL:-}"
+
+  if [[ -n "$name" ]]; then
+    git config --global user.name "$name"
+  fi
+  if [[ -n "$email" ]]; then
+    git config --global user.email "$email"
+  fi
+
+  if [[ -n "$name" || -n "$email" ]]; then
+    log "git identity configured"
+  else
+    log "git identity not configured (set GIT_USER_NAME and GIT_USER_EMAIL to enable)"
+  fi
+}
+
 main() {
   require_cmd bash
   install_uv
@@ -73,6 +97,7 @@ main() {
     log "uvx: $(uvx --version)"
   fi
 
+  configure_git_identity
   maybe_init_project
   log "setup complete"
 }
