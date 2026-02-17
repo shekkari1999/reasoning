@@ -1,9 +1,10 @@
-# Core
+torch
 transformers
 accelerate
+datasets
+sympy
+wandb
+pyyaml
+tqdm
 ipykernel
-
-# Optional: uncomment if you need these
-# torch
-# jupyter
-# tqdm
+huggingface_hub

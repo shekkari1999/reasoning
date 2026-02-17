@@ -1,10 +1,15 @@
 .venv
 .vscode
 models/
-<<<<<<< HEAD
 .cache
 .jupyter
 .env
-=======
 .tmp.driveupload/
->>>>>>> 235a3d6 (added new cells)
+.tmp.drivedownload/
+.DS_Store
+__pycache__/
+*.pyc
+wandb/
+checkpoints/
+*.pt
+*.bin
