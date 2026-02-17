@@ -1,6 +1,10 @@
 .venv
 .vscode
 models/
+<<<<<<< HEAD
 .cache
 .jupyter
 .env
+=======
+.tmp.driveupload/
+>>>>>>> 235a3d6 (added new cells)
