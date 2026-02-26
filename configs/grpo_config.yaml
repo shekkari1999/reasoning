@@ -1,0 +1,66 @@
+# GRPO Config — Qwen-2.5-3B on 2×A100 40GB
+# Group Relative Policy Optimization (DeepSeek-R1 style)
+
+model:
+  name: "Qwen/Qwen2.5-3B"
+  dtype: "bf16"
+  sft_checkpoint: "checkpoints/sft/final"  # starting point
+
+training:
+  micro_batch_size: 1        # tight memory — 2 models in VRAM
+  gradient_accumulation_steps: 4
+  num_steps: 200
+  warmup_steps: 20
+
+optimizer:
+  type: "adamw"
+  lr: 5.0e-7               # much lower than SFT
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+scheduler:
+  type: "cosine"
+  min_lr: 5.0e-8
+
+grpo:
+  group_size: 4              # G — completions per prompt
+  max_rollout_len: 512
+  num_prompts_per_step: 4    # 4 prompts × 4 completions = 16 rollouts
+  temperature: 0.7
+  top_p: 0.95
+  clip_eps: 0.2              # symmetric clipping
+  kl_beta: 0.1               # KL penalty coefficient
+  kl_type: "forward"         # KL(policy || ref)
+
+reference_model:
+  enabled: true              # frozen copy for KL penalty
+  # Costs 3GB/GPU — accounted for in memory budget
+
+fsdp:
+  sharding_strategy: "FULL_SHARD"
+  mixed_precision: "bf16"
+  activation_checkpointing: true
+  forward_prefetch: true
+
+data:
+  dataset: "openai/gsm8k"
+  split: "train"
+  # Only need prompts, not solutions — reward comes from exact match
+
+logging:
+  log_every: 5
+  save_every: 50
+  output_dir: "checkpoints/grpo"
+  track_metrics:
+    - reward_mean
+    - reward_std
+    - kl_divergence
+    - policy_loss
+    - advantages_mean
+    - grad_norm
+
+profiling:
+  enabled: false
+  warmup_steps: 10
+  capture_steps: 20

@@ -1,0 +1,65 @@
+# Dr. GRPO Config — Qwen-2.5-3B on 2×A100 40GB
+# Removes KL penalty and reference model from vanilla GRPO
+# Simplified advantage: (r - mean) without std normalization
+
+model:
+  name: "Qwen/Qwen2.5-3B"
+  dtype: "bf16"
+  sft_checkpoint: "checkpoints/sft/final"
+
+training:
+  micro_batch_size: 2        # more room — no ref model (saves 3GB/GPU)
+  gradient_accumulation_steps: 4
+  num_steps: 200
+  warmup_steps: 20
+
+optimizer:
+  type: "adamw"
+  lr: 5.0e-7
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+scheduler:
+  type: "cosine"
+  min_lr: 5.0e-8
+
+dr_grpo:
+  group_size: 4
+  max_rollout_len: 512
+  num_prompts_per_step: 4
+  temperature: 0.7
+  top_p: 0.95
+  clip_eps: 0.2
+  # NO kl_beta — Dr. GRPO drops KL entirely
+  # NO reference model — saves 3GB/GPU
+  advantage_type: "mean_only"  # (r - mean) instead of (r - mean) / (std + eps)
+
+reference_model:
+  enabled: false
+
+fsdp:
+  sharding_strategy: "FULL_SHARD"
+  mixed_precision: "bf16"
+  activation_checkpointing: true
+  forward_prefetch: true
+
+data:
+  dataset: "openai/gsm8k"
+  split: "train"
+
+logging:
+  log_every: 5
+  save_every: 50
+  output_dir: "checkpoints/dr_grpo"
+  track_metrics:
+    - reward_mean
+    - reward_std
+    - policy_loss
+    - advantages_mean
+    - grad_norm
+
+profiling:
+  enabled: false
+  warmup_steps: 10
+  capture_steps: 20

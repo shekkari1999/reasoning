@@ -1,0 +1,83 @@
+# DAPO Config — Qwen-2.5-3B on 2×A100 40GB
+# Dynamic Sampling Advantage Policy Optimization
+# Key differences from GRPO:
+#   - Asymmetric clipping (higher epsilon on upside)
+#   - Dynamic sampling: skip prompts where all G completions get same reward
+#   - Overlong penalty: penalize completions that hit max_len without answering
+#   - No KL penalty, no reference model
+
+model:
+  name: "Qwen/Qwen2.5-3B"
+  dtype: "bf16"
+  sft_checkpoint: "checkpoints/sft/final"
+
+training:
+  micro_batch_size: 2        # no ref model — more room
+  gradient_accumulation_steps: 4
+  num_steps: 200
+  warmup_steps: 20
+
+optimizer:
+  type: "adamw"
+  lr: 5.0e-7
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+scheduler:
+  type: "cosine"
+  min_lr: 5.0e-8
+
+dapo:
+  group_size: 4
+  max_rollout_len: 512
+  num_prompts_per_step: 4
+  temperature: 0.7
+  top_p: 0.95
+
+  # Asymmetric clipping — let the policy explore more on the upside
+  clip_eps_low: 0.2          # tighter clip for negative advantage
+  clip_eps_high: 0.28        # looser clip for positive advantage
+
+  # Dynamic sampling — skip zero-variance groups
+  dynamic_sampling: true
+  # If all G completions get same reward → zero advantage → zero gradient
+  # Skip these entirely to avoid wasting compute
+
+  # Overlong penalty
+  overlong_penalty: true
+  overlong_penalty_scale: -0.5  # penalty for hitting max_len without answer
+
+  # No KL
+  # kl_beta: 0.0
+
+reference_model:
+  enabled: false
+
+fsdp:
+  sharding_strategy: "FULL_SHARD"
+  mixed_precision: "bf16"
+  activation_checkpointing: true
+  forward_prefetch: true
+
+data:
+  dataset: "openai/gsm8k"
+  split: "train"
+
+logging:
+  log_every: 5
+  save_every: 50
+  output_dir: "checkpoints/dapo"
+  track_metrics:
+    - reward_mean
+    - reward_std
+    - policy_loss
+    - advantages_mean
+    - grad_norm
+    - prompts_skipped       # DAPO-specific: how many zero-variance groups
+    - overlong_count        # DAPO-specific: how many hit max_len
+
+profiling:
+  enabled: false
+  warmup_steps: 10
+  capture_steps: 20
