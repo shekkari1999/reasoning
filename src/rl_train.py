@@ -29,9 +29,12 @@ import sys
 import math
 import argparse
 from pathlib import Path
+from tqdm import tqdm
+import wandb
 
 import yaml
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -82,6 +85,80 @@ def set_lr(optimizer, lr):
 
 
 # ---------------------------------------------------------------------------
+# FSDP-compatible generation
+# ---------------------------------------------------------------------------
+
+def _top_p_sample(logits: torch.Tensor, top_p: float) -> torch.Tensor:
+    """Nucleus (top-p) sampling. Returns (batch, 1) token indices."""
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+    # Keep at least one token: mask tokens whose *preceding* cumulative prob >= top_p
+    mask = (cumulative_probs - F.softmax(sorted_logits, dim=-1)) >= top_p
+    sorted_logits[mask] = float('-inf')
+    logits = torch.zeros_like(logits).scatter(-1, sorted_indices, sorted_logits)
+    return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+
+
+@torch.no_grad()
+def generate_with_fsdp(
+    model: FSDP,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    pad_token_id: int,
+    eos_token_id: int,
+) -> torch.Tensor:
+    """Autoregressive generation that works with FSDP.
+
+    Calls model() directly (through FSDP's forward) so FSDP handles
+    parameter all-gather/reshard correctly on each forward pass.
+    Uses KV cache for efficiency.
+
+    Returns:
+        generated: (batch, prompt_len + generated_len) full token IDs
+    """
+    device = input_ids.device
+    batch_size = input_ids.shape[0]
+    unfinished = torch.ones(batch_size, dtype=torch.bool, device=device)
+
+    generated = input_ids
+    cur_mask = attention_mask.clone()
+    past_key_values = None
+
+    for _ in range(max_new_tokens):
+        if past_key_values is None:
+            outputs = model(input_ids=generated, attention_mask=cur_mask, use_cache=True)
+        else:
+            outputs = model(input_ids=next_token, attention_mask=cur_mask,
+                            past_key_values=past_key_values, use_cache=True)
+
+        past_key_values = outputs.past_key_values
+        logits = outputs.logits[:, -1, :] / temperature
+
+        next_token = _top_p_sample(logits, top_p)  # (batch, 1)
+
+        # Pad finished sequences
+        next_token = torch.where(
+            unfinished.unsqueeze(-1), next_token,
+            torch.full_like(next_token, pad_token_id),
+        )
+
+        generated = torch.cat([generated, next_token], dim=-1)
+        cur_mask = torch.cat([cur_mask, unfinished.unsqueeze(-1).long()], dim=-1)
+
+        # Check EOS
+        unfinished = unfinished & (next_token.squeeze(-1) != eos_token_id)
+        if not unfinished.any():
+            break
+
+    del past_key_values
+    torch.cuda.empty_cache()
+    return generated
+
+
+# ---------------------------------------------------------------------------
 # Rollout generation
 # ---------------------------------------------------------------------------
 
@@ -129,15 +206,16 @@ def generate_rollouts(
     expanded_ids = prompt_ids.repeat_interleave(G, dim=0)       # (B*G, prompt_len)
     expanded_mask = attention_mask.repeat_interleave(G, dim=0)   # (B*G, prompt_len)
 
-    # Generate
-    output_ids = model.module.generate(
+    # Generate through FSDP forward (not model.module.generate which bypasses FSDP)
+    output_ids = generate_with_fsdp(
+        model=model,
         input_ids=expanded_ids,
         attention_mask=expanded_mask,
         max_new_tokens=max_new_tokens,
-        do_sample=True,
         temperature=temperature,
         top_p=top_p,
         pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
     )
 
     # Build full sequences and masks
@@ -175,16 +253,28 @@ def generate_rollouts(
     completion_lens = torch.tensor(completion_lens, device=output_ids.device)
 
     # Compute log-probs of the generated sequences under current policy
+    # Process in chunks to avoid OOM (full batch logits = B*G × seq_len × vocab)
     if profile:
         torch.cuda.nvtx.range_push("rollout_logprobs")
 
+    prompt_lens_tensor = torch.tensor(
+        [expanded_ids.shape[1]] * output_ids.shape[0], device=output_ids.device
+    )
+    chunk_size = 2
+    old_logprobs_list = []
+
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        per_token_lp = get_per_token_logprobs(model, output_ids, full_mask)
-        old_logprobs = sequence_logprobs(
-            per_token_lp, full_mask,
-            torch.tensor([expanded_ids.shape[1]] * output_ids.shape[0],
-                         device=output_ids.device)
-        )
+        for i in range(0, output_ids.shape[0], chunk_size):
+            chunk_ids = output_ids[i:i+chunk_size]
+            chunk_mask = full_mask[i:i+chunk_size]
+            chunk_prompt_lens = prompt_lens_tensor[i:i+chunk_size]
+
+            chunk_lp = get_per_token_logprobs(model, chunk_ids, chunk_mask)
+            chunk_seq_lp = sequence_logprobs(chunk_lp, chunk_mask, chunk_prompt_lens)
+            old_logprobs_list.append(chunk_seq_lp)
+            del chunk_lp
+
+    old_logprobs = torch.cat(old_logprobs_list, dim=0)
 
     if profile:
         torch.cuda.nvtx.range_pop()  # rollout_logprobs
@@ -454,6 +544,12 @@ def train(config: dict, algo: str, profile_mode: bool = False):
         print(f"  Profile: {profile_mode}")
         print(f"{'='*60}")
 
+        wandb.init(
+            project="reasoning-rl",
+            name=f"{algo}-{model_name.split('/')[-1]}",
+            config=config,
+        )
+
     # ---- Load tokenizer ----
     tokenizer = load_tokenizer(model_name)
 
@@ -515,7 +611,8 @@ def train(config: dict, algo: str, profile_mode: bool = False):
     data_iter = iter(dataloader)
     policy.train()
 
-    for step in range(num_steps):
+    pbar = tqdm(range(num_steps), desc=f"{algo.upper()}", disable=(rank != 0))
+    for step in pbar:
         profiler.step(step)
 
         if profile_mode:
@@ -607,6 +704,25 @@ def train(config: dict, algo: str, profile_mode: bool = False):
                 prompts_skipped=loss_dict.get("prompts_skipped", 0),
             )
 
+            pbar.set_postfix(
+                loss=f"{loss_dict['loss'].item():.3f}",
+                reward=f"{reward_mean:.2f}",
+                mem=f"{torch.cuda.max_memory_allocated() / 1e9:.1f}G",
+            )
+
+            wandb.log({
+                "loss": loss_dict["loss"].item(),
+                "surrogate_loss": loss_dict["surrogate_loss"].item(),
+                "kl": loss_dict["kl"].item(),
+                "ratio_mean": loss_dict["ratio_mean"].item(),
+                "reward/mean": reward_mean,
+                "reward/std": reward_std,
+                "lr": lr,
+                "grad_norm": grad_norm.item() if not loss_dict.get("skipped_step") and isinstance(grad_norm, torch.Tensor) else 0.0,
+                "prompts_skipped": loss_dict.get("prompts_skipped", 0),
+                "memory/peak_gb": torch.cuda.max_memory_allocated() / 1e9,
+            }, step=step)
+
             if step % log_every == 0 or step == num_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 tracker.update(step=step, peak_mem_gb=mem)
@@ -645,6 +761,8 @@ def train(config: dict, algo: str, profile_mode: bool = False):
         print(f"  Checkpoint: {output_dir}/final")
         print(f"  Metrics: {output_dir}/{algo}_metrics.json")
         print(f"{'='*60}")
+
+        wandb.finish()
 
     dist.destroy_process_group()
 

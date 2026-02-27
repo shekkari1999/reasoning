@@ -4,7 +4,7 @@
 model:
   name: "Qwen/Qwen2.5-3B"
   dtype: "bf16"
-  sft_checkpoint: "checkpoints/sft/final"  # starting point
+  sft_checkpoint: "checkpoints/sft/final/step_300"  # starting point
 
 training:
   micro_batch_size: 1        # tight memory — 2 models in VRAM
@@ -25,7 +25,7 @@ scheduler:
 
 grpo:
   group_size: 4              # G — completions per prompt
-  max_rollout_len: 512
+  max_rollout_len: 1024
   num_prompts_per_step: 4    # 4 prompts × 4 completions = 16 rollouts
   temperature: 0.7
   top_p: 0.95

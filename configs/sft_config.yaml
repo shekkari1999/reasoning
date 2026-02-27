@@ -6,10 +6,10 @@ model:
   dtype: "bf16"
 
 training:
-  micro_batch_size: 2
+  micro_batch_size: 3
   gradient_accumulation_steps: 4
   # Effective batch = 2 × 4 × 2 GPUs = 16
-  seq_len: 1024
+  seq_len: 512
   num_steps: 300
   warmup_steps: 30
 

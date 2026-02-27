@@ -1,0 +1,19 @@
+[
+  {
+    "config": "mb3_acc4_seq512",
+    "oom": false,
+    "micro_batch_size": 3,
+    "gradient_accumulation_steps": 4,
+    "seq_len": 512,
+    "effective_batch": 24,
+    "tokens_per_step": 12288,
+    "avg_step_time_s": 16.0832,
+    "tokens_per_sec": 764.0,
+    "samples_per_sec": 1.49,
+    "peak_memory_gb": 23.504,
+    "allocated_memory_gb": 9.831,
+    "memory_utilization_pct": 58.8,
+    "num_steps_measured": 5,
+    "step_time_std": 0.1561
+  }
+]
