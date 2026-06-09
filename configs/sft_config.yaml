@@ -40,7 +40,7 @@ data:
 
 logging:
   log_every: 10
-  save_every: 100
+  save_every: 300
   output_dir: "checkpoints/sft"
 
 profiling:
