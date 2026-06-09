@@ -24,7 +24,11 @@ pip install -q --upgrade pip
 pip install -q -r requirements.txt
 
 if [ -n "${HF_TOKEN:-}" ]; then
-  huggingface-cli login --token "$HF_TOKEN"
+  if command -v hf &>/dev/null; then
+    hf auth login --token "$HF_TOKEN"
+  else
+    echo "WARN: hf CLI not found; skipping HF login (model may already be cached)"
+  fi
 fi
 
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
