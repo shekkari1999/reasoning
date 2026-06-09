@@ -5,6 +5,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [ ! -d .venv ]; then
+  python3 -m venv .venv
+fi
+source .venv/bin/activate
+pip install -q --upgrade pip
+pip install -q -r requirements.txt
+
 echo "=== GPU info ==="
 nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
 
