@@ -1,0 +1,18 @@
+{
+  "model": "Qwen/Qwen2.5-3B",
+  "stage": "base",
+  "prompt_mode": "base",
+  "dtype": "bf16",
+  "gsm8k": {
+    "accuracy": 71.42,
+    "correct": 942,
+    "total": 1319,
+    "elapsed_seconds": 601.4
+  },
+  "math500": {
+    "accuracy": 37.6,
+    "correct": 188,
+    "total": 500,
+    "elapsed_seconds": 318.2
+  }
+}

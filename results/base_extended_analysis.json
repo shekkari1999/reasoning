@@ -1,0 +1,38 @@
+{
+  "model": "Qwen/Qwen2.5-3B",
+  "stage": "base",
+  "gsm8k_pass_at_k": {
+    "1": 65.94,
+    "2": 79.41,
+    "4": 89.11,
+    "8": 94.5
+  },
+  "math500_pass_at_k": {
+    "1": 35.08,
+    "2": 45.93,
+    "4": 55.58,
+    "8": 64.0
+  },
+  "pass_at_k_config": {
+    "K": 8,
+    "temperature": 0.7,
+    "gsm8k_n": 200,
+    "math500_n": 150
+  },
+  "gsm8k_consistency": {
+    "always_correct": 61,
+    "mixed": 128,
+    "always_wrong": 11
+  },
+  "math500_consistency": {
+    "always_correct": 16,
+    "mixed": 80,
+    "always_wrong": 54
+  },
+  "length_stats": {
+    "gsm8k_median": 91.0,
+    "gsm8k_mean": 96.88400303260046,
+    "math500_median": 144.0,
+    "math500_mean": 147.494
+  }
+}
