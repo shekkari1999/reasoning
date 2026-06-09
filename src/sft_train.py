@@ -44,6 +44,8 @@ from src.profiling_utils import (
     Timer,
     log_memory,
     reset_peak_memory,
+    gather_all_gpu_memory,
+    save_memory_report,
 )
 
 
@@ -318,9 +320,22 @@ def train(config: dict, profile_mode: bool = False):
     # ---- Cleanup ----
     profiler.stop()
 
+    gpu_memory = gather_all_gpu_memory()
     if rank == 0:
         tracker.save(filename="sft_metrics.json")
         log_memory("end of training")
+        save_memory_report(
+            "results/memory_sft.json",
+            stage="sft",
+            gpus=gpu_memory,
+            extra={
+                "model": model_name,
+                "micro_batch_size": micro_batch_size,
+                "gradient_accumulation_steps": accum_steps,
+                "seq_len": seq_len,
+                "num_gpus": world_size,
+            },
+        )
 
         print(f"\n{'='*60}")
         print(f"SFT TRAINING COMPLETE")

@@ -84,7 +84,34 @@ Base Qwen2.5-3B  →  SFT  →  SFT + Dr.GRPO / GRPO / DAPO
 
 Only claim numbers that appear in `results/*_eval_summary.json`.
 
-## 6. If something breaks
+## 6. Memory analysis
+
+**Eval (1 GPU)** — memory is saved automatically in `results/*_eval_summary.json`:
+
+```bash
+python src/baseline_eval.py --model Qwen/Qwen2.5-3B --dataset gsm8k --max_samples 20 --stage base
+# check: results/base_eval_summary.json → memory.peak_gb_max
+```
+
+**Pre-training sweep (2 GPU)** — estimate SFT vs GRPO headroom before a long run:
+
+```bash
+bash scripts/run_memory_analysis.sh
+# or manually:
+torchrun --nproc_per_node=2 src/sweep.py --mode quick --num_steps 10   # SFT
+torchrun --nproc_per_node=2 src/sweep.py --mode grpo                  # 2-model GRPO
+```
+
+**During training** — peak memory per GPU is logged every `log_every` steps and saved at end:
+
+| Stage | Live logs | Final report |
+|-------|-----------|--------------|
+| SFT | `peak_mem_gb` in stdout | `results/memory_sft.json` |
+| Dr.GRPO / GRPO / DAPO | `mem=XX.XG` in tqdm | `results/memory_{algo}.json` |
+
+Training curves with per-step peaks: `checkpoints/sft/sft_metrics.json`, `checkpoints/dr_grpo/dr_grpo_metrics.json`.
+
+## 7. If something breaks
 
 Log it in `experiments/debug_log.md` with:
 - command you ran

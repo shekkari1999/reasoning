@@ -65,6 +65,8 @@ from src.profiling_utils import (
     MetricTracker,
     log_memory,
     reset_peak_memory,
+    gather_all_gpu_memory,
+    save_memory_report,
 )
 
 
@@ -749,9 +751,24 @@ def train(config: dict, algo: str, profile_mode: bool = False):
 
     profiler.stop()
 
+    gpu_memory = gather_all_gpu_memory()
     if rank == 0:
         tracker.save(filename=f"{algo}_metrics.json")
         log_memory("end of training")
+        save_memory_report(
+            f"results/memory_{algo}.json",
+            stage=algo,
+            gpus=gpu_memory,
+            extra={
+                "model": model_name,
+                "sft_checkpoint": sft_checkpoint,
+                "group_size": G,
+                "max_rollout_len": max_rollout_len,
+                "num_prompts_per_step": num_prompts,
+                "use_ref_model": use_ref_model,
+                "num_gpus": dist.get_world_size(),
+            },
+        )
 
         print(f"\n{'='*60}")
         print(f"{algo.upper()} TRAINING COMPLETE")

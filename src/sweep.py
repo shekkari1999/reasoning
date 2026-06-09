@@ -217,7 +217,8 @@ def benchmark_config(
         "samples_per_sec": round(samples_per_sec, 2),
         "peak_memory_gb": memory["peak_gb"],
         "allocated_memory_gb": memory["allocated_gb"],
-        "memory_utilization_pct": round(memory["peak_gb"] / 40.0 * 100, 1),
+        "memory_utilization_pct": memory["utilization_pct"],
+        "gpu_total_gb": memory["total_gb"],
         "num_steps_measured": len(step_times),
         "step_time_std": round(
             (sum((t - avg_step_time)**2 for t in step_times) / len(step_times)) ** 0.5,
@@ -418,8 +419,8 @@ def run_grpo_memory_test(
                 "oom": False,
                 "peak_memory_gb": peak_mem["peak_gb"],
                 "memory_after_model_load_gb": mem_after_models["peak_gb"],
-                "memory_utilization_pct": round(peak_mem["peak_gb"] / 40.0 * 100, 1),
-                "headroom_gb": round(40.0 - peak_mem["peak_gb"], 1),
+                "memory_utilization_pct": peak_mem["utilization_pct"],
+                "headroom_gb": round(peak_mem["total_gb"] - peak_mem["peak_gb"], 1),
             }
 
             del policy, ref

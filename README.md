@@ -24,27 +24,38 @@ All three use Group Relative Policy Optimization — the group of G completions 
 
 ### Baseline (Qwen-2.5-3B, no fine-tuning)
 
-| Benchmark | Accuracy |
-|-----------|----------|
-| GSM8K | 70.0% |
-| MATH500 | ~40% |
+Verified on **1× H100 80GB** (bf16, greedy decode, Jun 2025).
+
+| Benchmark | Accuracy | Correct/Total | Time |
+|-----------|----------|---------------|------|
+| GSM8K | **71.4%** | 942/1319 | 10.0 min |
+| MATH500 | **37.6%** | 188/500 | 5.3 min |
 
 ### Pass@K Analysis — Motivation for RL
 
-| Metric | GSM8K |
-|--------|-------|
-| pass@1 (greedy) | 70.0% |
-| pass@1 (sampled, T=0.7) | 67.7% |
-| pass@8 (sampled, T=0.7) | 95.0% |
-| **Gap (RL opportunity)** | **27.3%** |
+Sampled eval on **200 GSM8K** + **150 MATH500** problems, K=8, T=0.7 (1× H100).
 
-The 27.3% gap between pass@1 and pass@8 demonstrates that the base model has significant latent reasoning capability that greedy decoding fails to surface. GRPO exploits this gap by sampling multiple completions, identifying which ones succeed, and reinforcing those trajectories.
+| Metric | GSM8K | MATH500 |
+|--------|-------|---------|
+| pass@1 (sampled) | 65.9% | 35.1% |
+| pass@2 | 79.4% | 45.9% |
+| pass@4 | 89.1% | 55.6% |
+| pass@8 | **94.5%** | **64.0%** |
+| **Gap (pass@8 − pass@1)** | **28.6%** | **28.9%** |
+
+| Consistency (8 samples/problem) | GSM8K | MATH500 |
+|---------------------------------|-------|---------|
+| Always correct | 61 (30%) | 16 (11%) |
+| Mixed (sometimes right) | 128 (64%) | 80 (53%) |
+| Always wrong | 11 (6%) | 54 (36%) |
+
+The ~29% gap on both benchmarks shows the base model already solves many problems in at least one of 8 samples, but greedy/single-sample decoding misses them. **64% of GSM8K problems are "mixed"** — exactly the regime GRPO targets by reinforcing successful trajectories from the group.
 
 ### Training Pipeline Results
 
 | Stage | GSM8K | MATH500 | Peak Mem/GPU |
 |-------|-------|---------|--------------|
-| Base | 70.0% | ~40% | — |
+| Base | **71.4%** | **37.6%** | — |
 | SFT | — | — | — |
 | GRPO | — | — | — |
 | Dr. GRPO | — | — | — |

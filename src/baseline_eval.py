@@ -26,6 +26,7 @@ from src.rewards import (
     extract_model_answer,
     normalize_answer,
 )
+from src.profiling_utils import get_visible_gpu_memory, log_memory, reset_peak_memory
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,8 @@ def main():
     )
     model.eval()
     print(f"Loaded. Params: {sum(p.numel() for p in model.parameters())/1e9:.2f}B")
+    log_memory("after model load")
+    reset_peak_memory()
 
     # Load datasets
     datasets_to_eval = []
@@ -232,12 +235,20 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    memory = get_visible_gpu_memory()
     save_data = {
         "model": args.model,
         "stage": args.stage,
         "prompt_mode": args.prompt_mode,
         "dtype": args.dtype,
+        "batch_size": args.batch_size,
+        "memory": {
+            "peak_gb_per_gpu": [g["peak_gb"] for g in memory],
+            "peak_gb_max": max((g["peak_gb"] for g in memory), default=0.0),
+            "gpus": memory,
+        },
     }
+    log_memory("after eval")
     for ds_name, result in all_results.items():
         save_data[ds_name] = {
             "accuracy": result["accuracy"],
