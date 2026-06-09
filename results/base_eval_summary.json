@@ -3,38 +3,16 @@
   "stage": "base",
   "prompt_mode": "base",
   "dtype": "bf16",
-  "batch_size": 16,
-  "memory": {
-    "peak_gb_per_gpu": [
-      3.55,
-      3.544
-    ],
-    "peak_gb_max": 3.55,
-    "gpus": [
-      {
-        "gpu_id": 0,
-        "gpu_name": "NVIDIA H100 80GB HBM3",
-        "total_gb": 85.0,
-        "allocated_gb": 3.122,
-        "reserved_gb": 3.651,
-        "peak_gb": 3.55,
-        "utilization_pct": 4.2
-      },
-      {
-        "gpu_id": 1,
-        "gpu_name": "NVIDIA H100 80GB HBM3",
-        "total_gb": 85.0,
-        "allocated_gb": 3.117,
-        "reserved_gb": 3.615,
-        "peak_gb": 3.544,
-        "utilization_pct": 4.2
-      }
-    ]
-  },
   "gsm8k": {
-    "accuracy": 65.0,
-    "correct": 13,
-    "total": 20,
-    "elapsed_seconds": 65.5
+    "accuracy": 71.42,
+    "correct": 942,
+    "total": 1319,
+    "elapsed_seconds": 601.4
+  },
+  "math500": {
+    "accuracy": 37.6,
+    "correct": 188,
+    "total": 500,
+    "elapsed_seconds": 318.2
   }
 }

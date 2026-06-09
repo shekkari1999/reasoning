@@ -89,8 +89,9 @@ Only claim numbers that appear in `results/*_eval_summary.json`.
 **Eval (1 GPU)** — memory is saved automatically in `results/*_eval_summary.json`:
 
 ```bash
-python src/baseline_eval.py --model Qwen/Qwen2.5-3B --dataset gsm8k --max_samples 20 --stage base
-# check: results/base_eval_summary.json → memory.peak_gb_max
+bash scripts/run_memory_analysis.sh
+# eval VRAM probe: results/memory_probe_eval_summary.json → memory.peak_gb_max
+# (does not overwrite results/base_eval_summary.json)
 ```
 
 **Pre-training sweep (2 GPU)** — estimate SFT vs GRPO headroom before a long run:

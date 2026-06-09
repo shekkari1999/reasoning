@@ -16,14 +16,14 @@ echo "=== GPU info ==="
 nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
 
 echo ""
-echo "=== 1/3 Eval memory (1 GPU, inference only) ==="
+echo "=== 1/3 Eval memory probe (20 samples, does NOT touch base results) ==="
 python src/baseline_eval.py \
   --model Qwen/Qwen2.5-3B \
   --dataset gsm8k \
   --max_samples 20 \
-  --stage base \
+  --stage memory_probe \
   --batch_size 16
-echo "  -> results/base_eval_summary.json includes memory.peak_gb_max"
+echo "  -> results/memory_probe_eval_summary.json (memory.peak_gb_max)"
 
 echo ""
 echo "=== 2/3 SFT memory sweep (2 GPU, 10 steps) ==="
