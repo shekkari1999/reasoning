@@ -1,0 +1,37 @@
+{
+  "stage": "dr_grpo",
+  "num_gpus": 2,
+  "peak_mem_gb_per_gpu": [
+    50.598,
+    48.91
+  ],
+  "peak_mem_gb_max": 50.598,
+  "gpus": [
+    {
+      "gpu_id": 0,
+      "gpu_name": "NVIDIA H100 80GB HBM3",
+      "total_gb": 85.0,
+      "allocated_gb": 9.345,
+      "reserved_gb": 59.366,
+      "peak_gb": 50.598,
+      "utilization_pct": 59.5,
+      "rank": 0
+    },
+    {
+      "gpu_id": 1,
+      "gpu_name": "NVIDIA H100 80GB HBM3",
+      "total_gb": 85.0,
+      "allocated_gb": 9.345,
+      "reserved_gb": 60.251,
+      "peak_gb": 48.91,
+      "utilization_pct": 57.5,
+      "rank": 1
+    }
+  ],
+  "model": "Qwen/Qwen2.5-3B",
+  "sft_checkpoint": "checkpoints/sft/final/step_300",
+  "group_size": 4,
+  "max_rollout_len": 1024,
+  "num_prompts_per_step": 4,
+  "use_ref_model": false
+}
