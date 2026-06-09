@@ -9,93 +9,23 @@ Usage:
     python src/baseline_eval.py --model checkpoints/sft/step_300 --dataset both --prompt_mode sft
 """
 
-import os
-import sys
-import re
-import math
 import json
+import sys
 import time
-import random
 import argparse
 from pathlib import Path
-from typing import Optional
-from collections import defaultdict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
-# ---------------------------------------------------------------------------
-# Answer extraction (inlined from rewards.py for standalone use)
-# ---------------------------------------------------------------------------
-
-def extract_answer_gsm8k(text: str) -> Optional[str]:
-    match = re.search(r"####\s*(.+)", text)
-    if match:
-        return normalize_numeric(match.group(1).strip())
-    return None
-
-def extract_answer_boxed(text: str) -> Optional[str]:
-    idx = text.rfind("\\boxed{")
-    if idx == -1:
-        return None
-    depth = 0
-    start = idx + len("\\boxed{")
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            if depth == 0:
-                return normalize_answer(text[start:i].strip())
-            depth -= 1
-    return None
-
-def extract_answer_tags(text: str) -> Optional[str]:
-    match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
-    if match:
-        return normalize_answer(match.group(1).strip())
-    return None
-
-def extract_last_number(text: str) -> Optional[str]:
-    matches = re.findall(r"-?\d+(?:\.\d+)?(?:/\d+)?", text)
-    if matches:
-        return normalize_numeric(matches[-1])
-    return None
-
-def extract_model_answer(text: str) -> Optional[str]:
-    for fn in [extract_answer_tags, extract_answer_boxed, extract_answer_gsm8k, extract_last_number]:
-        ans = fn(text)
-        if ans is not None:
-            return ans
-    return None
-
-def normalize_answer(text: str) -> str:
-    text = text.strip()
-    for remove in ["\\$", "$", "\\%", "\\text{", "\\mathrm{", "\\frac",
-                    "\\left", "\\right", "\\,", "\\ "]:
-        text = text.replace(remove, "")
-    text = text.replace("%", "").rstrip(".").strip()
-    numeric = normalize_numeric(text)
-    return numeric if numeric is not None else text.lower()
-
-def normalize_numeric(text: str) -> Optional[str]:
-    text = text.strip().replace(",", "").replace(" ", "")
-    frac = re.match(r"^(-?\d+)/(\d+)$", text)
-    if frac:
-        num, den = int(frac.group(1)), int(frac.group(2))
-        if den != 0:
-            val = num / den
-            return str(int(val)) if val == int(val) else str(round(val, 6))
-    try:
-        val = float(text)
-        if math.isnan(val) or math.isinf(val):
-            return None
-        if val == int(val) and "." not in text:
-            return str(int(val))
-        return str(round(val, 6))
-    except ValueError:
-        return None
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.rewards import (
+    extract_answer_boxed,
+    extract_answer_gsm8k,
+    extract_model_answer,
+    normalize_answer,
+)
 
 
 # ---------------------------------------------------------------------------

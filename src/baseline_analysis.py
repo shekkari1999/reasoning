@@ -12,81 +12,28 @@ Usage:
     python src/baseline_analysis.py --model Qwen/Qwen2.5-3B --pass_k_samples 200
 """
 
-import os
-import re
-import sys
 import json
-import math
+import sys
 import time
 import random
 import argparse
 from pathlib import Path
-from typing import Optional
 from math import comb
 from collections import defaultdict
 
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
-# ---------------------------------------------------------------------------
-# Import extraction functions (same as baseline_eval.py)
-# ---------------------------------------------------------------------------
-
-def extract_answer_gsm8k(text):
-    match = re.search(r"####\s*(.+)", text)
-    return normalize_numeric(match.group(1).strip()) if match else None
-
-def extract_answer_boxed(text):
-    idx = text.rfind("\\boxed{")
-    if idx == -1: return None
-    depth, start = 0, idx + len("\\boxed{")
-    for i in range(start, len(text)):
-        if text[i] == "{": depth += 1
-        elif text[i] == "}":
-            if depth == 0: return normalize_answer(text[start:i].strip())
-            depth -= 1
-    return None
-
-def extract_answer_tags(text):
-    match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
-    return normalize_answer(match.group(1).strip()) if match else None
-
-def extract_last_number(text):
-    matches = re.findall(r"-?\d+(?:\.\d+)?(?:/\d+)?", text)
-    return normalize_numeric(matches[-1]) if matches else None
-
-def extract_model_answer(text):
-    for fn in [extract_answer_tags, extract_answer_boxed, extract_answer_gsm8k, extract_last_number]:
-        ans = fn(text)
-        if ans is not None: return ans
-    return None
-
-def normalize_answer(text):
-    text = text.strip()
-    for r in ["\\$","$","\\%","\\text{","\\mathrm{","\\frac","\\left","\\right","\\,","\\ "]:
-        text = text.replace(r, "")
-    text = text.replace("%","").rstrip(".").strip()
-    numeric = normalize_numeric(text)
-    return numeric if numeric is not None else text.lower()
-
-def normalize_numeric(text):
-    text = text.strip().replace(",","").replace(" ","")
-    frac = re.match(r"^(-?\d+)/(\d+)$", text)
-    if frac:
-        n, d = int(frac.group(1)), int(frac.group(2))
-        if d != 0:
-            v = n/d
-            return str(int(v)) if v == int(v) else str(round(v,6))
-    try:
-        v = float(text)
-        if math.isnan(v) or math.isinf(v): return None
-        if v == int(v) and "." not in text: return str(int(v))
-        return str(round(v,6))
-    except ValueError: return None
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.rewards import (
+    extract_answer_boxed,
+    extract_answer_gsm8k,
+    extract_model_answer,
+    normalize_answer,
+)
 
 
 # ---------------------------------------------------------------------------
