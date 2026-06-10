@@ -6,25 +6,25 @@
   "batch_size": 32,
   "memory": {
     "peak_gb_per_gpu": [
-      13.313
+      12.445
     ],
-    "peak_gb_max": 13.313,
+    "peak_gb_max": 12.445,
     "gpus": [
       {
         "gpu_id": 0,
         "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         "total_gb": 102.0,
         "allocated_gb": 6.181,
-        "reserved_gb": 86.26,
-        "peak_gb": 13.313,
-        "utilization_pct": 13.1
+        "reserved_gb": 68.311,
+        "peak_gb": 12.445,
+        "utilization_pct": 12.2
       }
     ]
   },
-  "math500": {
-    "accuracy": 33.6,
-    "correct": 168,
-    "total": 500,
-    "elapsed_seconds": 3110.1
+  "gsm8k": {
+    "accuracy": 70.36,
+    "correct": 928,
+    "total": 1319,
+    "elapsed_seconds": 7656.4
   }
 }
