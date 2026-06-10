@@ -2,34 +2,34 @@
   "stage": "sft",
   "num_gpus": 2,
   "peak_mem_gb_per_gpu": [
-    16.605,
-    16.605
+    21.166,
+    21.166
   ],
-  "peak_mem_gb_max": 16.605,
+  "peak_mem_gb_max": 21.166,
   "gpus": [
     {
       "gpu_id": 0,
-      "gpu_name": "NVIDIA H100 80GB HBM3",
-      "total_gb": 85.0,
-      "allocated_gb": 9.362,
-      "reserved_gb": 22.402,
-      "peak_gb": 16.605,
-      "utilization_pct": 19.5,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "total_gb": 102.0,
+      "allocated_gb": 9.297,
+      "reserved_gb": 27.118,
+      "peak_gb": 21.166,
+      "utilization_pct": 20.8,
       "rank": 0
     },
     {
       "gpu_id": 1,
-      "gpu_name": "NVIDIA H100 80GB HBM3",
-      "total_gb": 85.0,
-      "allocated_gb": 9.362,
-      "reserved_gb": 22.712,
-      "peak_gb": 16.605,
-      "utilization_pct": 19.5,
+      "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "total_gb": 102.0,
+      "allocated_gb": 9.297,
+      "reserved_gb": 26.542,
+      "peak_gb": 21.166,
+      "utilization_pct": 20.8,
       "rank": 1
     }
   ],
   "model": "Qwen/Qwen2.5-3B",
-  "micro_batch_size": 3,
-  "gradient_accumulation_steps": 4,
-  "seq_len": 512
+  "micro_batch_size": 1,
+  "gradient_accumulation_steps": 8,
+  "seq_len": 4096
 }
