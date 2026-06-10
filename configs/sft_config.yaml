@@ -1,4 +1,4 @@
-# SFT Config — Qwen-2.5-3B on 2×A100 40GB
+# SFT Config — Qwen-2.5-3B on 2×96GB (g7e.12xlarge)
 # Chain-of-thought supervised fine-tuning
 
 model:
@@ -6,12 +6,13 @@ model:
   dtype: "bf16"
 
 training:
-  micro_batch_size: 3
-  gradient_accumulation_steps: 4
-  # Effective batch = 2 × 4 × 2 GPUs = 16
-  seq_len: 512
-  num_steps: 300
-  warmup_steps: 30
+  micro_batch_size: 1
+  gradient_accumulation_steps: 8
+  # Effective batch = 1 × 8 × 2 GPUs = 16
+  # mb=1 at seq_len=4096 (~45-50 GB/GPU peak, ~12-15h for 625 steps)
+  seq_len: 4096
+  num_steps: 625          # 1 epoch over 10k subset (625 × 16 = 10,000 samples)
+  warmup_steps: 63        # ~10% warmup
 
 optimizer:
   type: "adamw"
@@ -40,7 +41,7 @@ data:
 
 logging:
   log_every: 10
-  save_every: 300
+  save_every: 200         # checkpoint mid-run (~14h run); final at step 625
   output_dir: "checkpoints/sft"
 
 profiling:

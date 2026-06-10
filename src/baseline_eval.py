@@ -168,8 +168,9 @@ def main():
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B")
     parser.add_argument("--dataset", type=str, default="both",
                         choices=["gsm8k", "math500", "both"])
-    parser.add_argument("--prompt_mode", type=str, default="base",
-                        choices=["base", "sft"])
+    parser.add_argument("--prompt_mode", type=str, default="sft",
+                        choices=["base", "sft"],
+                        help="sft = zero-shot CoT prompt (fair ladder). base = few-shot (legacy only).")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--max_samples", type=int, default=0)
