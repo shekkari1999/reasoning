@@ -36,7 +36,6 @@ from src.losses import (
 )
 from src.rewards import compute_reward
 from src.profiling_utils import (
-    nvtx_range,
     ProfilerControl,
     MetricTracker,
     log_memory,
@@ -624,7 +623,7 @@ def train(config: dict, profile_mode: bool = False):
         print(f"{'='*60}")
         print(f"  Steps: {num_steps}")
         print(f"  Final reward mean: {reward_mean:.3f}")
-        print(f"  Checkpoint: {output_dir}/final")
+        print(f"  Checkpoint: {output_dir}/final/step_{num_steps}")
         print(f"  Metrics: {output_dir}/dr_grpo_metrics.json")
         print(f"{'='*60}")
 

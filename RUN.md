@@ -100,4 +100,16 @@ torchrun --nproc_per_node=2 src/sweep.py --mode quick --num_steps 10   # SFT
 | SFT | `peak_mem_gb` in stdout | `results/memory_sft.json` |
 | Dr.GRPO | `mem=XX.XG` in tqdm | `results/memory_dr_grpo.json` |
 
-Training curves with per-step peaks: `checkpoints/sft/sft_metrics.json`, `checkpoints/dr_grpo/dr_grpo_metrics.json`.
+Training metrics with per-step peaks: `checkpoints/sft/sft_metrics.json` and
+`checkpoints/dr_grpo/dr_grpo_metrics.json`.
+
+## 7. Optional Nsight profile
+
+With Nsight Systems installed, capture the steady-state SFT window after ten
+warmup steps:
+
+```bash
+bash scripts/profile_sft.sh
+```
+
+The report is written under `profiles/`, which is excluded from Git.

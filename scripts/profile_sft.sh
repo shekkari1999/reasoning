@@ -1,6 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # scripts/profile_sft.sh — Profile SFT training with Nsight Systems
-set -e
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
 
 mkdir -p profiles
 

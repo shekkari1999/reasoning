@@ -38,10 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.model import load_model, load_tokenizer, wrap_model_fsdp, save_hf_checkpoint
 from src.data import create_sft_dataloader
 from src.profiling_utils import (
-    nvtx_range,
     ProfilerControl,
     MetricTracker,
-    Timer,
     log_memory,
     reset_peak_memory,
     gather_all_gpu_memory,
@@ -220,7 +218,6 @@ def train(config: dict, profile_mode: bool = False):
         enabled=profile_mode,
     )
     tracker = MetricTracker(log_dir=output_dir)
-    timer = Timer(cuda_sync=True)
 
     if rank == 0:
         log_memory("before training")
@@ -342,7 +339,7 @@ def train(config: dict, profile_mode: bool = False):
         print(f"{'='*60}")
         print(f"  Steps: {num_steps}")
         print(f"  Final loss: {step_loss:.4f}")
-        print(f"  Checkpoint: {output_dir}/final")
+        print(f"  Checkpoint: {output_dir}/final/step_{num_steps}")
         print(f"  Metrics: {output_dir}/sft_metrics.json")
         print(f"{'='*60}")
 

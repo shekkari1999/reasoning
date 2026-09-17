@@ -15,7 +15,6 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
     ShardingStrategy,
-    CPUOffload,
 )
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,

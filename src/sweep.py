@@ -37,7 +37,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.model import load_model, wrap_model_fsdp
-from src.profiling_utils import get_memory_stats, Timer
+from src.profiling_utils import get_memory_stats
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,6 @@ def benchmark_config(
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.empty_cache()
 
-    timer = Timer(cuda_sync=True)
     step_times = []
     oom = False
 
@@ -207,7 +206,7 @@ def benchmark_config(
         "samples_per_sec": round(samples_per_sec, 2),
         "peak_memory_gb": memory["peak_gb"],
         "allocated_memory_gb": memory["allocated_gb"],
-        "memory_utilization_pct": memory["utilization_pct"],
+        "memory_utilization_pct": memory["memory_utilization_pct"],
         "gpu_total_gb": memory["total_gb"],
         "num_steps_measured": len(step_times),
         "step_time_std": round(

@@ -1,48 +1,10 @@
-"""
-Profiling utilities for Nsight Systems and Nsight Compute.
+"""CUDA capture, memory reporting, and training-metric utilities."""
 
-Provides:
-  - NVTX range context managers for clean annotation
-  - cudaProfiler start/stop wrappers (capture only the steps you want)
-  - GPU memory logging
-  - Metric tracking for training curves
-"""
-
-import time
 import json
 from pathlib import Path
-from contextlib import contextmanager
 from collections import defaultdict
-from typing import Optional
 
 import torch
-import torch.cuda.nvtx as nvtx
-
-
-# ---------------------------------------------------------------------------
-# NVTX annotation
-# ---------------------------------------------------------------------------
-
-@contextmanager
-def nvtx_range(name: str):
-    """Context manager for NVTX range annotation.
-
-    Usage:
-        with nvtx_range("forward"):
-            logits = model(input_ids)
-    
-    Shows up as a labeled range in Nsight Systems timeline.
-    """
-    nvtx.range_push(name)
-    try:
-        yield
-    finally:
-        nvtx.range_pop()
-
-
-def nvtx_mark(name: str):
-    """Place a single marker (not a range) on the timeline."""
-    torch.cuda.nvtx.mark(name)
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +27,6 @@ class ProfilerControl:
 
     def __init__(self, warmup_steps: int = 10, capture_steps: int = 20, enabled: bool = True):
         self.warmup_steps = warmup_steps
-        self.capture_steps = capture_steps
         self.capture_end = warmup_steps + capture_steps
         self.enabled = enabled
         self.started = False
@@ -87,7 +48,7 @@ class ProfilerControl:
         if self.enabled and self.started and not self.stopped:
             torch.cuda.cudart().cudaProfilerStop()
             self.stopped = True
-            print(f"[Profiler] Stopped capture")
+            print("[Profiler] Stopped capture")
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +80,7 @@ def get_memory_stats(device: int = None) -> dict:
         "allocated_gb": round(torch.cuda.memory_allocated(device) / 1e9, 3),
         "reserved_gb": round(torch.cuda.memory_reserved(device) / 1e9, 3),
         "peak_gb": round(peak_gb, 3),
-        "utilization_pct": round(peak_gb / total_gb * 100, 1) if total_gb > 0 else 0.0,
+        "memory_utilization_pct": round(peak_gb / total_gb * 100, 1) if total_gb > 0 else 0.0,
     }
 
 
@@ -149,9 +110,9 @@ def save_memory_report(
     output_path: str | Path,
     stage: str,
     gpus: list[dict],
-    extra: Optional[dict] = None,
-) -> dict:
-    """Save a compact memory report JSON and return the payload."""
+    extra: dict | None = None,
+) -> None:
+    """Save a compact memory report as JSON."""
     peak_per_gpu = [g["peak_gb"] for g in gpus]
     report = {
         "stage": stage,
@@ -168,7 +129,6 @@ def save_memory_report(
     with open(path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Memory report saved to {path}")
-    return report
 
 
 def reset_peak_memory(device: int = 0):
@@ -181,14 +141,7 @@ def reset_peak_memory(device: int = 0):
 # ---------------------------------------------------------------------------
 
 class MetricTracker:
-    """Tracks training metrics for logging and plotting.
-    
-    Usage:
-        tracker = MetricTracker(log_dir="results")
-        tracker.update(step=10, loss=0.5, reward_mean=0.3, kl=0.1)
-        tracker.log(step=10)
-        tracker.save()
-    """
+    """Collect, print, and save per-step training metrics."""
 
     def __init__(self, log_dir: str = "results"):
         self.log_dir = Path(log_dir)
@@ -225,51 +178,3 @@ class MetricTracker:
         with open(path, "w") as f:
             json.dump(dict(self.history), f, indent=2)
         print(f"Metrics saved to {path}")
-
-    def get_history(self, key: str) -> tuple[list, list]:
-        """Get (steps, values) for a given metric."""
-        entries = self.history.get(key, [])
-        steps = [e["step"] for e in entries]
-        values = [e["value"] for e in entries]
-        return steps, values
-
-
-# ---------------------------------------------------------------------------
-# Timing utility
-# ---------------------------------------------------------------------------
-
-class Timer:
-    """Simple CUDA-aware timer.
-    
-    Usage:
-        timer = Timer()
-        with timer("forward"):
-            logits = model(x)
-        print(timer.summary())
-    """
-
-    def __init__(self, cuda_sync: bool = False):
-        self.cuda_sync = cuda_sync
-        self.times = defaultdict(list)
-
-    @contextmanager
-    def __call__(self, name: str):
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        yield
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        elapsed = time.perf_counter() - t0
-        self.times[name].append(elapsed)
-
-    def summary(self) -> str:
-        lines = []
-        for name, times in self.times.items():
-            avg = sum(times) / len(times)
-            total = sum(times)
-            lines.append(f"  {name}: avg={avg*1000:.1f}ms total={total:.2f}s ({len(times)} calls)")
-        return "\n".join(lines)
-
-    def reset(self):
-        self.times.clear()

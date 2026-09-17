@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Memory analysis on 2× GPU before / alongside training.
-# Produces JSON reports in results/ for README memory table.
+# Memory analysis on two GPUs before or alongside training.
+# Produces JSON reports under results/.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -37,4 +37,5 @@ echo ""
 echo "After real training, also check:"
 echo "  results/memory_sft.json"
 echo "  results/memory_dr_grpo.json"
-echo "  checkpoints/*/sft_metrics.json (peak_mem_gb over steps)"
+echo "  checkpoints/sft/sft_metrics.json"
+echo "  checkpoints/dr_grpo/dr_grpo_metrics.json"

@@ -8,8 +8,6 @@ Provides:
 """
 
 import random
-from typing import Optional
-
 import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from transformers import AutoTokenizer
