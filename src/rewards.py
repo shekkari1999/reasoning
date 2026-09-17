@@ -1,6 +1,6 @@
 """
 Reward functions and answer extraction utilities.
-Shared between eval (eval.py) and RL training (grpo/dr_grpo/dapo).
+Shared between evaluation and Dr.GRPO training.
 
 Handles two answer formats:
   - GSM8K:   "#### <number>"
@@ -166,28 +166,3 @@ def compute_batch_rewards(
         compute_reward(c, gt, dataset)
         for c, gt in zip(completions, ground_truths)
     ]
-
-
-# ---------------------------------------------------------------------------
-# DAPO-specific: overlong penalty
-# ---------------------------------------------------------------------------
-
-def compute_reward_with_overlong_penalty(
-    completion: str,
-    ground_truth: str,
-    completion_len: int,
-    max_len: int,
-    dataset: str = "gsm8k",
-    penalty_scale: float = -0.5
-) -> float:
-    """Reward with DAPO overlong penalty.
-
-    If the completion hits max_len without producing a valid answer,
-    apply a soft penalty to discourage rambling.
-    """
-    base_reward = compute_reward(completion, ground_truth, dataset)
-
-    if base_reward == 0.0 and completion_len >= max_len - 1:
-        return penalty_scale
-
-    return base_reward

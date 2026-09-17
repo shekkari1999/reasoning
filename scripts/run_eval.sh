@@ -18,28 +18,12 @@ if [ -d "checkpoints/sft/final" ]; then
         --dataset both --stage sft --prompt_mode sft --batch_size 16
 fi
 
-# GRPO
-if [ -d "checkpoints/grpo/final" ]; then
-    echo "--- GRPO ---"
-    python src/baseline_eval.py \
-        --model checkpoints/grpo/final \
-        --dataset both --stage grpo --prompt_mode sft --batch_size 16
-fi
-
 # Dr. GRPO
 if [ -d "checkpoints/dr_grpo/final" ]; then
     echo "--- Dr. GRPO ---"
     python src/baseline_eval.py \
         --model checkpoints/dr_grpo/final \
         --dataset both --stage dr_grpo --prompt_mode sft --batch_size 16
-fi
-
-# DAPO
-if [ -d "checkpoints/dapo/final" ]; then
-    echo "--- DAPO ---"
-    python src/baseline_eval.py \
-        --model checkpoints/dapo/final \
-        --dataset both --stage dapo --prompt_mode sft --batch_size 16
 fi
 
 echo ""

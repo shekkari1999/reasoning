@@ -4,7 +4,6 @@ Model loading and FSDP wrapping for Qwen-2.5-3B.
 Provides:
   - load_model(): Load Qwen with proper dtype
   - wrap_model_fsdp(): Wrap with FSDP, mixed precision, activation checkpointing
-  - load_reference_model(): Frozen copy for GRPO KL penalty
 """
 
 import functools
@@ -157,42 +156,6 @@ def wrap_model_fsdp(
     if local_rank == 0:
         log_memory("after FSDP wrap")
 
-    return model
-
-
-# ---------------------------------------------------------------------------
-# Reference model (for GRPO KL penalty)
-# ---------------------------------------------------------------------------
-
-def load_reference_model(
-    model_name_or_path: str,
-    dtype: torch.dtype = torch.bfloat16,
-    mixed_precision: str = "bf16",
-) -> FSDP:
-    """Load a frozen reference model for KL divergence computation.
-    
-    The reference model is FSDP-wrapped (for sharding) but has:
-      - No gradient computation
-      - No optimizer states
-      - Costs only ~3GB/GPU for 3B model
-    """
-    model = load_model(model_name_or_path, dtype=dtype)
-
-    # Freeze all parameters
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Wrap with FSDP for memory-efficient sharding (no grad, no optim states)
-    model = wrap_model_fsdp(
-        model,
-        mixed_precision=mixed_precision,
-        activation_checkpointing=False,  # not needed — no backward pass
-        forward_prefetch=True,
-        sync_module_states=True,
-    )
-
-    model.eval()
-    print("Reference model loaded and frozen")
     return model
 
 

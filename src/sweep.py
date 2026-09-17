@@ -28,7 +28,7 @@ import json
 import time
 import argparse
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -36,8 +36,8 @@ import torch.nn.functional as F
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.model import load_model, load_tokenizer, wrap_model_fsdp
-from src.profiling_utils import nvtx_range, log_memory, get_memory_stats, Timer
+from src.model import load_model, wrap_model_fsdp
+from src.profiling_utils import get_memory_stats, Timer
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +75,6 @@ SFT_SWEEP_CONFIGS = [
     SweepConfig(micro_batch_size=4, gradient_accumulation_steps=4, seq_len=512),
     SweepConfig(micro_batch_size=2, gradient_accumulation_steps=8, seq_len=1024),
 ]
-
-# GRPO sweep configs — tighter memory (2 models in VRAM)
-GRPO_SWEEP_CONFIGS = [
-    SweepConfig(micro_batch_size=1, gradient_accumulation_steps=4, seq_len=512),
-    SweepConfig(micro_batch_size=1, gradient_accumulation_steps=8, seq_len=512),
-    SweepConfig(micro_batch_size=2, gradient_accumulation_steps=4, seq_len=512),
-    SweepConfig(micro_batch_size=1, gradient_accumulation_steps=4, seq_len=768),
-    SweepConfig(micro_batch_size=2, gradient_accumulation_steps=2, seq_len=512),
-]
-
 
 # ---------------------------------------------------------------------------
 # Benchmark runner
@@ -255,7 +245,6 @@ def run_sweep(
 
     # Load model once
     model = load_model(model_name)
-    tokenizer = load_tokenizer(model_name)
     vocab_size = model.config.vocab_size
 
     results = []
@@ -341,108 +330,14 @@ def print_sweep_report(results: list[dict], rank: int = 0):
         print(f"{'='*90}")
 
         # Memory headroom analysis
-        headroom = 40.0 - best["peak_memory_gb"]
+        headroom = best["gpu_total_gb"] - best["peak_memory_gb"]
         print(f"\n  Memory headroom: {headroom:.1f} GB")
         if headroom < 3:
-            print(f"  ⚠ Tight. Consider reducing batch size for GRPO (2 models in memory).")
+            print("  Tight. Reduce the micro-batch size or sequence length.")
         elif headroom < 8:
-            print(f"  ✓ Good for SFT. May be tight for GRPO — run GRPO sweep separately.")
+            print("  Usable for SFT, but leave margin for variable-length batches.")
         else:
-            print(f"  ✓ Plenty of room. Could increase batch size further.")
-
-
-# ---------------------------------------------------------------------------
-# GRPO-specific sweep (2 models in memory)
-# ---------------------------------------------------------------------------
-
-def run_grpo_memory_test(
-    model_name: str,
-    configs: list[SweepConfig],
-    output_dir: str = "results",
-) -> list[dict]:
-    """Test GRPO memory usage — loads 2 models (policy + reference)."""
-    rank = dist.get_rank()
-
-    if rank == 0:
-        print(f"\n{'='*70}")
-        print(f"GRPO MEMORY SWEEP — 2 models (policy + frozen ref)")
-        print(f"{'='*70}")
-
-    results = []
-
-    for i, config in enumerate(configs):
-        if rank == 0:
-            print(f"\n--- Config {i+1}/{len(configs)}: {config.label} ---")
-
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-        try:
-            # Load policy model
-            policy = load_model(model_name)
-            policy = wrap_model_fsdp(policy, activation_checkpointing=True)
-
-            # Load reference model (frozen)
-            ref = load_model(model_name)
-            for p in ref.parameters():
-                p.requires_grad = False
-            ref = wrap_model_fsdp(ref, activation_checkpointing=False)
-            ref.eval()
-
-            mem_after_models = get_memory_stats()
-
-            # Simulate forward passes for both
-            device = torch.cuda.current_device()
-            vocab_size = policy.module.config.vocab_size if hasattr(policy, 'module') else 151936
-
-            batch = create_dummy_batch(config.micro_batch_size, config.seq_len, vocab_size, device)
-
-            # Policy forward + backward
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out = policy(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-                loss = F.cross_entropy(
-                    out.logits[:, :-1, :].reshape(-1, vocab_size),
-                    batch["labels"][:, 1:].reshape(-1),
-                )
-            loss.backward()
-
-            # Ref forward (no grad)
-            with torch.no_grad():
-                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                    ref_out = ref(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-
-            torch.cuda.synchronize()
-            peak_mem = get_memory_stats()
-
-            result = {
-                "config": config.label,
-                "oom": False,
-                "peak_memory_gb": peak_mem["peak_gb"],
-                "memory_after_model_load_gb": mem_after_models["peak_gb"],
-                "memory_utilization_pct": peak_mem["utilization_pct"],
-                "headroom_gb": round(peak_mem["total_gb"] - peak_mem["peak_gb"], 1),
-            }
-
-            del policy, ref
-            torch.cuda.empty_cache()
-
-        except torch.cuda.OutOfMemoryError:
-            result = {"config": config.label, "oom": True}
-            torch.cuda.empty_cache()
-
-        results.append(result)
-
-        if rank == 0:
-            if result["oom"]:
-                print(f"    OOM")
-            else:
-                print(f"    peak={result['peak_memory_gb']:.1f}GB "
-                      f"({result['memory_utilization_pct']}%) "
-                      f"headroom={result['headroom_gb']:.1f}GB")
-
-        dist.barrier()
-
-    return results
+            print("  Plenty of room. A larger micro-batch may improve throughput.")
 
 
 # ---------------------------------------------------------------------------
@@ -453,9 +348,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B")
     parser.add_argument("--mode", type=str, default="quick",
-                        choices=["quick", "full", "single", "grpo"],
+                        choices=["quick", "full", "single"],
                         help="quick=throughput only, full=with NVTX, "
-                             "single=one config, grpo=memory test with 2 models")
+                             "single=one config")
     parser.add_argument("--micro_batch", type=int, default=2)
     parser.add_argument("--accum_steps", type=int, default=4)
     parser.add_argument("--seq_len", type=int, default=1024)
@@ -475,25 +370,17 @@ def main():
 
     if args.mode == "single":
         configs = [SweepConfig(args.micro_batch, args.accum_steps, args.seq_len)]
-    elif args.mode == "grpo":
-        configs = GRPO_SWEEP_CONFIGS
     else:
         configs = SFT_SWEEP_CONFIGS
 
-    # Run sweep
-    if args.mode == "grpo":
-        results = run_grpo_memory_test(args.model, configs, args.output_dir)
-    else:
-        results = run_sweep(
-            args.model, configs, args.mode,
-            num_warmup=args.num_warmup,
-            num_steps=args.num_steps,
-            output_dir=args.output_dir,
-        )
+    results = run_sweep(
+        args.model, configs, args.mode,
+        num_warmup=args.num_warmup,
+        num_steps=args.num_steps,
+        output_dir=args.output_dir,
+    )
 
-    # Report
-    if args.mode != "grpo":
-        print_sweep_report(results, rank)
+    print_sweep_report(results, rank)
 
     # Save
     if rank == 0:

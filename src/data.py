@@ -3,7 +3,7 @@ Data loading and tokenization for SFT and RL training.
 
 Provides:
   - SFTDataset: Tokenized chain-of-thought traces for supervised fine-tuning
-  - RLPromptDataset: Prompts only (no solutions) for GRPO/Dr.GRPO/DAPO
+  - RLPromptDataset: Prompts only (no solutions) for Dr.GRPO
   - Collator functions for batching
 """
 
@@ -200,7 +200,7 @@ class SFTCollator:
 
 
 # ---------------------------------------------------------------------------
-# RL Prompt Dataset (for GRPO / Dr. GRPO / DAPO)
+# RL Prompt Dataset (for Dr.GRPO)
 # ---------------------------------------------------------------------------
 
 class RLPromptDataset(Dataset):

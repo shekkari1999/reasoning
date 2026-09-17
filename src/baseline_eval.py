@@ -6,7 +6,7 @@ Run on a single GPU (Colab, RunPod, etc.)
 
 Usage:
     python src/baseline_eval.py --model Qwen/Qwen2.5-3B --dataset both
-    python src/baseline_eval.py --model checkpoints/sft/step_300 --dataset both --prompt_mode sft
+    python src/baseline_eval.py --model checkpoints/sft/final/step_625 --dataset both --prompt_mode sft
 """
 
 import json
@@ -178,7 +178,7 @@ def main():
                         choices=["bf16", "fp16"])
     parser.add_argument("--output_dir", type=str, default="results")
     parser.add_argument("--stage", type=str, default="base",
-                        help="Label: base, sft, grpo, dr_grpo, dapo")
+                        help="Output label, for example: base, sft, or dr_grpo")
     args = parser.parse_args()
 
     # Load model

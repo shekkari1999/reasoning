@@ -18,6 +18,11 @@ Training uses FSDP on 2× 96 GB Blackwell GPUs. Batch size and sequence length w
 | SFT | 71.2% | 33.1% |
 | Dr.GRPO | 78.2% | 45.6% |
 
+These are the updated-run metrics recorded in
+[`results/latest_run_summary.json`](results/latest_run_summary.json). The other
+result files are retained as legacy artifacts from earlier checkpoints and
+prompt settings.
+
 ## Stack
 
 Python, PyTorch, FSDP, Hugging Face Transformers

@@ -16,7 +16,7 @@ echo "=== GPU info ==="
 nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
 
 echo ""
-echo "=== 1/3 Eval memory probe (20 samples, does NOT touch base results) ==="
+echo "=== 1/2 Eval memory probe (20 samples, does NOT touch base results) ==="
 python src/baseline_eval.py \
   --model Qwen/Qwen2.5-3B \
   --dataset gsm8k \
@@ -26,14 +26,9 @@ python src/baseline_eval.py \
 echo "  -> results/memory_probe_eval_summary.json (memory.peak_gb_max)"
 
 echo ""
-echo "=== 2/3 SFT memory sweep (2 GPU, 10 steps) ==="
+echo "=== 2/2 SFT memory sweep (2 GPU, 10 steps) ==="
 torchrun --nproc_per_node=2 src/sweep.py --mode quick --num_steps 10
 echo "  -> results/sweep_quick_results.json"
-
-echo ""
-echo "=== 3/3 GRPO memory sweep (2 GPU, policy + ref model) ==="
-torchrun --nproc_per_node=2 src/sweep.py --mode grpo
-echo "  -> results/sweep_grpo_results.json"
 
 echo ""
 echo "=== Memory reports ==="
@@ -41,5 +36,5 @@ ls -la results/memory_*.json results/sweep_*_results.json 2>/dev/null || true
 echo ""
 echo "After real training, also check:"
 echo "  results/memory_sft.json"
-echo "  results/memory_dr_grpo.json / memory_grpo.json / memory_dapo.json"
+echo "  results/memory_dr_grpo.json"
 echo "  checkpoints/*/sft_metrics.json (peak_mem_gb over steps)"

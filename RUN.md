@@ -5,23 +5,21 @@ Simple order: smoke test locally, then rent GPU for eval and training.
 ## 1. Local setup (Mac or GPU box)
 
 ```bash
-cd Reasoning_model
+cd reasoning
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python tests/smoke_test.py
 ```
 
-If smoke tests pass, the reward logic and GRPO loss math are wired correctly.
+If smoke tests pass, the reward logic and Dr.GRPO loss math are wired correctly.
 
 ## 2. GPU to rent
 
 | Job | GPU | Why |
 |-----|-----|-----|
-| Baseline eval + pass@k | **1x H100 80GB** | Qwen2.5-3B fits easily; batch 16 is fast |
-| SFT + RL training | **2x H100 80GB** or **2x A100 40GB** | Scripts use `torchrun --nproc_per_node=2` + FSDP |
-
-H100 is the best signal for your portfolio (matches triton-kernels / mini-vllm). A100 40GB works if H100 is booked.
+| Baseline eval | **1x H100 80GB** | Qwen2.5-3B fits easily; batch 16 is fast |
+| SFT + RL training | **2x 96GB Blackwell**, **2x H100 80GB**, or **2x A100 40GB** | Scripts use `torchrun --nproc_per_node=2` + FSDP |
 
 Provider: RunPod or Lambda, Ubuntu 22.04, CUDA 12.x.
 
@@ -46,14 +44,10 @@ python src/baseline_eval.py \
   --dataset both \
   --stage base \
   --batch_size 16
-
-# pass@k analysis (200 samples, sampled decoding)
-python src/baseline_analysis.py \
-  --model Qwen/Qwen2.5-3B \
-  --pass_k_samples 200
 ```
 
-Results land in `results/*_eval_summary.json`.
+New evaluations land in `results/*_eval_summary.json`. The committed updated-run
+headline metrics live in `results/latest_run_summary.json`.
 
 ## 4. Training order (after baseline numbers exist)
 
@@ -61,12 +55,8 @@ Results land in `results/*_eval_summary.json`.
 # SFT first
 bash scripts/run_sft.sh
 
-# RL — start with Dr.GRPO (no ref model, easiest on memory)
+# RL — Dr.GRPO (no ref model, easiest on memory)
 bash scripts/run_dr_grpo.sh
-
-# Then compare algorithms
-bash scripts/run_grpo.sh
-bash scripts/run_dapo.sh
 
 # Re-eval all checkpoints
 bash scripts/run_eval.sh
@@ -74,12 +64,13 @@ bash scripts/run_eval.sh
 
 ## 5. What to compare
 
-Same benchmarks, same test split, same eval script:
+Use the same benchmarks, test splits, prompt mode, and decoder settings for all
+three stages:
 
 ```
-Base Qwen2.5-3B  →  SFT  →  SFT + Dr.GRPO / GRPO / DAPO
+Base Qwen2.5-3B  →  SFT  →  SFT + Dr.GRPO
          ↓              ↓              ↓
-              GSM8K test + MATH500 (pass@1, pass@8)
+              GSM8K test + MATH500
 ```
 
 Only claim numbers that appear in `results/*_eval_summary.json`.
@@ -94,13 +85,12 @@ bash scripts/run_memory_analysis.sh
 # (does not overwrite results/base_eval_summary.json)
 ```
 
-**Pre-training sweep (2 GPU)** — estimate SFT vs GRPO headroom before a long run:
+**Pre-training sweep (2 GPU)** — estimate SFT vs RL headroom before a long run:
 
 ```bash
 bash scripts/run_memory_analysis.sh
 # or manually:
 torchrun --nproc_per_node=2 src/sweep.py --mode quick --num_steps 10   # SFT
-torchrun --nproc_per_node=2 src/sweep.py --mode grpo                  # 2-model GRPO
 ```
 
 **During training** — peak memory per GPU is logged every `log_every` steps and saved at end:
@@ -108,15 +98,6 @@ torchrun --nproc_per_node=2 src/sweep.py --mode grpo                  # 2-model 
 | Stage | Live logs | Final report |
 |-------|-----------|--------------|
 | SFT | `peak_mem_gb` in stdout | `results/memory_sft.json` |
-| Dr.GRPO / GRPO / DAPO | `mem=XX.XG` in tqdm | `results/memory_{algo}.json` |
+| Dr.GRPO | `mem=XX.XG` in tqdm | `results/memory_dr_grpo.json` |
 
 Training curves with per-step peaks: `checkpoints/sft/sft_metrics.json`, `checkpoints/dr_grpo/dr_grpo_metrics.json`.
-
-## 7. If something breaks
-
-Log it in `experiments/debug_log.md` with:
-- command you ran
-- error message
-- what you tried next
-
-That file is part of the deliverable, not optional.

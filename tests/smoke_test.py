@@ -11,7 +11,7 @@ from src.rewards import (
     extract_answer_gsm8k,
     extract_model_answer,
 )
-from src.losses import compute_advantages_dr_grpo, compute_advantages_grpo
+from src.losses import compute_advantages_dr_grpo
 
 
 def test_gsm8k_extraction():
@@ -29,15 +29,13 @@ def test_reward_correct():
     assert compute_reward(pred, gt, "gsm8k") == 1.0
 
 
-def test_grpo_advantages():
+def test_dr_grpo_advantages():
     import torch
 
     rewards = torch.tensor([[1.0, 0.0, 0.0, 1.0]])
-    adv = compute_advantages_grpo(rewards)
-    assert adv.shape == (1, 4)
-
     adv_dr = compute_advantages_dr_grpo(rewards)
     assert adv_dr.shape == (1, 4)
+    assert adv_dr.tolist() == [[0.5, -0.5, -0.5, 0.5]]
 
 
 def test_clipped_surrogate():
@@ -64,7 +62,7 @@ if __name__ == "__main__":
     tests = [
         test_gsm8k_extraction,
         test_reward_correct,
-        test_grpo_advantages,
+        test_dr_grpo_advantages,
         test_clipped_surrogate,
         test_imports,
     ]

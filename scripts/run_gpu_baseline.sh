@@ -25,10 +25,4 @@ python src/baseline_eval.py \
   --batch_size 16
 
 echo ""
-echo "=== pass@k analysis ==="
-python src/baseline_analysis.py \
-  --model Qwen/Qwen2.5-3B \
-  --pass_k_samples 200
-
-echo ""
 echo "Done. Check results/"

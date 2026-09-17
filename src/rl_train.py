@@ -1,27 +1,11 @@
 """
-Reinforcement Learning Training — GRPO / Dr.GRPO / DAPO
+Reinforcement Learning Training — Dr.GRPO
 
-Unified training loop. The three algorithms share rollout generation,
-reward computation, and FSDP infrastructure. They differ only in:
-  - Loss function (from losses.py)
-  - Whether a reference model is loaded
-  - Advantage computation
-  - (DAPO) Dynamic sampling and overlong penalty
+Training loop with rollout generation, reward computation, and FSDP
+infrastructure. Loss function and advantage computation live in losses.py.
 
 Usage:
-    # GRPO (with KL penalty + reference model)
-    torchrun --nproc_per_node=2 src/rl_train.py --algo grpo --config configs/grpo_config.yaml
-
-    # Dr. GRPO (no KL, no ref model, simplified advantages)
-    torchrun --nproc_per_node=2 src/rl_train.py --algo dr_grpo --config configs/dr_grpo_config.yaml
-
-    # DAPO (asymmetric clipping, dynamic sampling, overlong penalty)
-    torchrun --nproc_per_node=2 src/rl_train.py --algo dapo --config configs/dapo_config.yaml
-
-    # Profile any variant
-    nsys profile --trace=cuda,nvtx,nccl --capture-range=cudaProfilerApi \
-        --output=profiles/grpo \
-        torchrun --nproc_per_node=2 src/rl_train.py --algo grpo --config configs/grpo_config.yaml --profile
+    torchrun --nproc_per_node=2 src/rl_train.py --config configs/dr_grpo_config.yaml
 """
 
 import os
@@ -41,24 +25,16 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.model import (
     load_model, load_tokenizer, wrap_model_fsdp,
-    load_reference_model, save_hf_checkpoint,
+    save_hf_checkpoint,
 )
 from src.data import create_rl_dataloader
 from src.losses import (
     get_per_token_logprobs,
     sequence_logprobs,
-    compute_advantages_grpo,
     compute_advantages_dr_grpo,
-    compute_advantages_dapo,
-    grpo_loss,
     dr_grpo_loss,
-    dapo_loss,
-    filter_dynamic_sampling,
 )
-from src.rewards import (
-    compute_reward,
-    compute_reward_with_overlong_penalty,
-)
+from src.rewards import compute_reward
 from src.profiling_utils import (
     nvtx_range,
     ProfilerControl,
@@ -195,7 +171,6 @@ def generate_rollouts(
             full_mask: (batch * G, full_seq_len)
             prompt_lens: (batch * G,) — original prompt lengths
             completions: list[str] — decoded completions
-            completion_lens: (batch * G,) — completion lengths in tokens
             old_logprobs: (batch * G,) — sequence log-probs under current policy
     """
     if profile:
@@ -233,7 +208,6 @@ def generate_rollouts(
 
     # Decode completions and apply stop strings
     completions = []
-    completion_lens = []
     prompt_lens = prompt_len_per_seq.clone()
 
     for i in range(output_ids.shape[0]):
@@ -249,10 +223,6 @@ def generate_rollouts(
                 text = text[:text.index(stop)]
 
         completions.append(text)
-        comp_tokens = tokenizer.encode(text, add_special_tokens=False)
-        completion_lens.append(len(comp_tokens))
-
-    completion_lens = torch.tensor(completion_lens, device=output_ids.device)
 
     # Compute log-probs of the generated sequences under current policy
     # Process in chunks to avoid OOM (full batch logits = B*G × seq_len × vocab)
@@ -292,7 +262,6 @@ def generate_rollouts(
         "prompt_lens": torch.tensor([expanded_ids.shape[1]] * output_ids.shape[0],
                                      device=output_ids.device),
         "completions": completions,
-        "completion_lens": completion_lens,
         "old_logprobs": old_logprobs.detach(),
     }
 
@@ -306,9 +275,6 @@ def compute_rollout_rewards(
     raw_answers: list[str],
     G: int,
     dataset: str = "gsm8k",
-    algo: str = "grpo",
-    completion_lens: torch.Tensor = None,
-    max_rollout_len: int = 512,
     profile: bool = False,
 ) -> torch.Tensor:
     """Compute rewards for all rollouts.
@@ -318,10 +284,6 @@ def compute_rollout_rewards(
         raw_answers: list of B ground truth answers (one per prompt)
         G: group size
         dataset: "gsm8k" or "math500"
-        algo: "grpo", "dr_grpo", or "dapo"
-        completion_lens: token lengths for overlong penalty (DAPO only)
-        max_rollout_len: max length for overlong check (DAPO only)
-
     Returns:
         rewards: (B, G) tensor
     """
@@ -337,17 +299,7 @@ def compute_rollout_rewards(
             completion = completions[idx]
             gt = raw_answers[i]
 
-            if algo == "dapo" and completion_lens is not None:
-                reward = compute_reward_with_overlong_penalty(
-                    completion, gt,
-                    completion_len=completion_lens[idx].item(),
-                    max_len=max_rollout_len,
-                    dataset=dataset,
-                )
-            else:
-                reward = compute_reward(completion, gt, dataset=dataset)
-
-            rewards[i, g] = reward
+            rewards[i, g] = compute_reward(completion, gt, dataset=dataset)
 
     if profile:
         torch.cuda.nvtx.range_pop()
@@ -360,29 +312,23 @@ def compute_rollout_rewards(
 # ---------------------------------------------------------------------------
 
 def rl_step(
-    algo: str,
     policy_model: FSDP,
-    ref_model: FSDP,
     rollout_data: dict,
     rewards: torch.Tensor,
-    G: int,
     config: dict,
     profile: bool = False,
 ) -> dict:
     """Single RL policy update step.
 
     Args:
-        algo: "grpo", "dr_grpo", or "dapo"
         policy_model: trainable FSDP model
-        ref_model: frozen reference (None for dr_grpo/dapo)
         rollout_data: from generate_rollouts()
         rewards: (B, G) tensor
-        G: group size
-        config: algorithm-specific config section
+        config: Dr.GRPO config section
         profile: NVTX annotations
 
     Returns:
-        dict with loss, surrogate, kl, reward stats
+        dict with loss, surrogate loss, and ratio statistics
     """
     device = next(policy_model.parameters()).device
     rewards = rewards.to(device)
@@ -391,56 +337,15 @@ def rl_step(
     if profile:
         torch.cuda.nvtx.range_push("advantage_computation")
 
-    if algo == "grpo":
-        advantages = compute_advantages_grpo(rewards)
-    elif algo == "dr_grpo":
-        advantages = compute_advantages_dr_grpo(rewards)
-    elif algo == "dapo":
-        advantages = compute_advantages_dapo(rewards)
-    else:
-        raise ValueError(f"Unknown algo: {algo}")
+    advantages = compute_advantages_dr_grpo(rewards)
 
     if profile:
         torch.cuda.nvtx.range_pop()
 
-    # ---- DAPO dynamic sampling: filter zero-variance groups ----
-    if algo == "dapo" and config.get("dynamic_sampling", False):
-        keep_mask = filter_dynamic_sampling(rewards)
-        num_skipped = (~keep_mask).sum().item()
-
-        if keep_mask.sum() == 0:
-            # All groups have zero variance — skip this step
-            return {
-                "loss": torch.tensor(0.0),
-                "surrogate_loss": torch.tensor(0.0),
-                "kl": torch.tensor(0.0),
-                "ratio_mean": torch.tensor(1.0),
-                "prompts_skipped": num_skipped,
-                "skipped_step": True,
-            }
-
-        # Filter to kept groups only
-        advantages = advantages[keep_mask]
-        rewards_kept = rewards[keep_mask]
-
-        # Filter rollout data — need to select the right indices
-        kept_indices = []
-        for i, keep in enumerate(keep_mask):
-            if keep:
-                for g in range(G):
-                    kept_indices.append(i * G + g)
-        kept_indices = torch.tensor(kept_indices, device=device)
-
-        full_ids = rollout_data["full_ids"][kept_indices]
-        full_mask = rollout_data["full_mask"][kept_indices]
-        prompt_lens = rollout_data["prompt_lens"][kept_indices]
-        old_logprobs = rollout_data["old_logprobs"][kept_indices]
-    else:
-        num_skipped = 0
-        full_ids = rollout_data["full_ids"]
-        full_mask = rollout_data["full_mask"]
-        prompt_lens = rollout_data["prompt_lens"]
-        old_logprobs = rollout_data["old_logprobs"]
+    full_ids = rollout_data["full_ids"]
+    full_mask = rollout_data["full_mask"]
+    prompt_lens = rollout_data["prompt_lens"]
+    old_logprobs = rollout_data["old_logprobs"]
 
     # Flatten advantages: (B, G) → (B*G,)
     advantages_flat = advantages.reshape(-1).to(device)
@@ -450,47 +355,21 @@ def rl_step(
         torch.cuda.nvtx.range_push("policy_loss_backward")
 
     with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-        if algo == "grpo":
-            loss_dict = grpo_loss(
-                policy_model=policy_model,
-                ref_model=ref_model,
-                input_ids=full_ids,
-                attention_mask=full_mask,
-                old_logprobs=old_logprobs,
-                advantages=advantages_flat,
-                prompt_lens=prompt_lens,
-                clip_eps=config.get("clip_eps", 0.2),
-                kl_beta=config.get("kl_beta", 0.1),
-            )
-        elif algo == "dr_grpo":
-            loss_dict = dr_grpo_loss(
-                policy_model=policy_model,
-                input_ids=full_ids,
-                attention_mask=full_mask,
-                old_logprobs=old_logprobs,
-                advantages=advantages_flat,
-                prompt_lens=prompt_lens,
-                clip_eps=config.get("clip_eps", 0.2),
-            )
-        elif algo == "dapo":
-            loss_dict = dapo_loss(
-                policy_model=policy_model,
-                input_ids=full_ids,
-                attention_mask=full_mask,
-                old_logprobs=old_logprobs,
-                advantages=advantages_flat,
-                prompt_lens=prompt_lens,
-                clip_eps_low=config.get("clip_eps_low", 0.2),
-                clip_eps_high=config.get("clip_eps_high", 0.28),
-            )
+        loss_dict = dr_grpo_loss(
+            policy_model=policy_model,
+            input_ids=full_ids,
+            attention_mask=full_mask,
+            old_logprobs=old_logprobs,
+            advantages=advantages_flat,
+            prompt_lens=prompt_lens,
+            clip_eps=config.get("clip_eps", 0.2),
+        )
 
     loss_dict["loss"].backward()
 
     if profile:
         torch.cuda.nvtx.range_pop()
 
-    loss_dict["prompts_skipped"] = num_skipped
-    loss_dict["skipped_step"] = False
     return loss_dict
 
 
@@ -498,7 +377,7 @@ def rl_step(
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train(config: dict, algo: str, profile_mode: bool = False):
+def train(config: dict, profile_mode: bool = False):
     # ---- Distributed setup ----
     dist.init_process_group("nccl")
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -509,23 +388,18 @@ def train(config: dict, algo: str, profile_mode: bool = False):
     # ---- Config parsing ----
     model_name = config["model"]["name"]
     sft_checkpoint = config["model"]["sft_checkpoint"]
-    micro_batch_size = config["training"]["micro_batch_size"]
-    accum_steps = config["training"]["gradient_accumulation_steps"]
     num_steps = config["training"]["num_steps"]
     warmup_steps = config["training"]["warmup_steps"]
 
     max_lr = config["optimizer"]["lr"]
     min_lr = config["scheduler"]["min_lr"]
 
-    # Algorithm-specific config
-    algo_config = config.get(algo, config.get("grpo", {}))
+    algo_config = config["dr_grpo"]
     G = algo_config["group_size"]
     max_rollout_len = algo_config["max_rollout_len"]
     num_prompts = algo_config["num_prompts_per_step"]
     temperature = algo_config["temperature"]
     top_p = algo_config["top_p"]
-
-    use_ref_model = config.get("reference_model", {}).get("enabled", False)
 
     log_every = config["logging"]["log_every"]
     save_every = config["logging"]["save_every"]
@@ -533,7 +407,7 @@ def train(config: dict, algo: str, profile_mode: bool = False):
 
     if rank == 0:
         print(f"\n{'='*60}")
-        print(f"RL Training — {algo.upper()}")
+        print("RL Training — DR_GRPO")
         print(f"{'='*60}")
         print(f"  Model: {model_name}")
         print(f"  SFT checkpoint: {sft_checkpoint}")
@@ -541,14 +415,13 @@ def train(config: dict, algo: str, profile_mode: bool = False):
         print(f"  G={G} | prompts/step={num_prompts} | "
               f"rollouts/step={num_prompts * G}")
         print(f"  max_rollout_len={max_rollout_len} | temp={temperature}")
-        print(f"  Reference model: {use_ref_model}")
         print(f"  Steps: {num_steps} | lr: {max_lr}")
         print(f"  Profile: {profile_mode}")
         print(f"{'='*60}")
 
         wandb.init(
             project="reasoning-rl",
-            name=f"{algo}-{model_name.split('/')[-1]}",
+            name=f"dr-grpo-{model_name.split('/')[-1]}",
             config=config,
         )
 
@@ -566,17 +439,6 @@ def train(config: dict, algo: str, profile_mode: bool = False):
 
     if rank == 0:
         log_memory("after policy load")
-
-    # ---- Load reference model (GRPO only) ----
-    ref_model = None
-    if use_ref_model:
-        ref_model = load_reference_model(
-            sft_checkpoint,
-            dtype=torch.bfloat16,
-            mixed_precision=config["fsdp"]["mixed_precision"],
-        )
-        if rank == 0:
-            log_memory("after ref model load")
 
     # ---- Optimizer ----
     optimizer = torch.optim.AdamW(
@@ -613,12 +475,12 @@ def train(config: dict, algo: str, profile_mode: bool = False):
     data_iter = iter(dataloader)
     policy.train()
 
-    pbar = tqdm(range(num_steps), desc=f"{algo.upper()}", disable=(rank != 0))
+    pbar = tqdm(range(num_steps), desc="DR_GRPO", disable=(rank != 0))
     for step in pbar:
         profiler.step(step)
 
         if profile_mode:
-            torch.cuda.nvtx.range_push(f"{algo}_step_{step}")
+            torch.cuda.nvtx.range_push(f"dr_grpo_step_{step}")
 
         # LR schedule
         lr = get_cosine_lr(step, num_steps, warmup_steps, max_lr, min_lr)
@@ -654,39 +516,31 @@ def train(config: dict, algo: str, profile_mode: bool = False):
             raw_answers=raw_answers,
             G=G,
             dataset="gsm8k",
-            algo=algo,
-            completion_lens=rollout_data["completion_lens"],
-            max_rollout_len=max_rollout_len,
             profile=profile_mode,
         )
 
         # ---- Policy update ----
         loss_dict = rl_step(
-            algo=algo,
             policy_model=policy,
-            ref_model=ref_model,
             rollout_data=rollout_data,
             rewards=rewards,
-            G=G,
             config=algo_config,
             profile=profile_mode,
         )
 
-        if not loss_dict.get("skipped_step", False):
-            # Gradient clipping
-            if profile_mode:
-                torch.cuda.nvtx.range_push("optimizer_step")
+        if profile_mode:
+            torch.cuda.nvtx.range_push("optimizer_step")
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
-            optimizer.step()
+        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+        optimizer.step()
 
-            if profile_mode:
-                torch.cuda.nvtx.range_pop()  # optimizer_step
+        if profile_mode:
+            torch.cuda.nvtx.range_pop()  # optimizer_step
 
         optimizer.zero_grad(set_to_none=True)
 
         if profile_mode:
-            torch.cuda.nvtx.range_pop()  # algo_step
+            torch.cuda.nvtx.range_pop()  # dr_grpo_step
 
         # ---- Logging ----
         if rank == 0:
@@ -697,13 +551,11 @@ def train(config: dict, algo: str, profile_mode: bool = False):
                 step=step,
                 loss=loss_dict["loss"].item(),
                 surrogate_loss=loss_dict["surrogate_loss"].item(),
-                kl=loss_dict["kl"].item(),
                 ratio_mean=loss_dict["ratio_mean"].item(),
                 reward_mean=reward_mean,
                 reward_std=reward_std,
                 lr=lr,
-                grad_norm=grad_norm.item() if not loss_dict.get("skipped_step") and isinstance(grad_norm, torch.Tensor) else 0.0,
-                prompts_skipped=loss_dict.get("prompts_skipped", 0),
+                grad_norm=grad_norm.item(),
             )
 
             pbar.set_postfix(
@@ -715,20 +567,18 @@ def train(config: dict, algo: str, profile_mode: bool = False):
             wandb.log({
                 "loss": loss_dict["loss"].item(),
                 "surrogate_loss": loss_dict["surrogate_loss"].item(),
-                "kl": loss_dict["kl"].item(),
                 "ratio_mean": loss_dict["ratio_mean"].item(),
                 "reward/mean": reward_mean,
                 "reward/std": reward_std,
                 "lr": lr,
-                "grad_norm": grad_norm.item() if not loss_dict.get("skipped_step") and isinstance(grad_norm, torch.Tensor) else 0.0,
-                "prompts_skipped": loss_dict.get("prompts_skipped", 0),
+                "grad_norm": grad_norm.item(),
                 "memory/peak_gb": torch.cuda.max_memory_allocated() / 1e9,
             }, step=step)
 
             if step % log_every == 0 or step == num_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 tracker.update(step=step, peak_mem_gb=mem)
-                tracker.log(step, prefix=algo.upper())
+                tracker.log(step, prefix="DR_GRPO")
 
         # ---- Checkpointing ----
         if (step + 1) % save_every == 0:
@@ -753,11 +603,11 @@ def train(config: dict, algo: str, profile_mode: bool = False):
 
     gpu_memory = gather_all_gpu_memory()
     if rank == 0:
-        tracker.save(filename=f"{algo}_metrics.json")
+        tracker.save(filename="dr_grpo_metrics.json")
         log_memory("end of training")
         save_memory_report(
-            f"results/memory_{algo}.json",
-            stage=algo,
+            "results/memory_dr_grpo.json",
+            stage="dr_grpo",
             gpus=gpu_memory,
             extra={
                 "model": model_name,
@@ -765,18 +615,17 @@ def train(config: dict, algo: str, profile_mode: bool = False):
                 "group_size": G,
                 "max_rollout_len": max_rollout_len,
                 "num_prompts_per_step": num_prompts,
-                "use_ref_model": use_ref_model,
                 "num_gpus": dist.get_world_size(),
             },
         )
 
         print(f"\n{'='*60}")
-        print(f"{algo.upper()} TRAINING COMPLETE")
+        print("DR_GRPO TRAINING COMPLETE")
         print(f"{'='*60}")
         print(f"  Steps: {num_steps}")
         print(f"  Final reward mean: {reward_mean:.3f}")
         print(f"  Checkpoint: {output_dir}/final")
-        print(f"  Metrics: {output_dir}/{algo}_metrics.json")
+        print(f"  Metrics: {output_dir}/dr_grpo_metrics.json")
         print(f"{'='*60}")
 
         wandb.finish()
@@ -785,27 +634,11 @@ def train(config: dict, algo: str, profile_mode: bool = False):
 
 
 # ---------------------------------------------------------------------------
-# Thin wrappers for each algorithm (can also be called directly)
-# ---------------------------------------------------------------------------
-
-def train_grpo(config, profile=False):
-    train(config, algo="grpo", profile_mode=profile)
-
-def train_dr_grpo(config, profile=False):
-    train(config, algo="dr_grpo", profile_mode=profile)
-
-def train_dapo(config, profile=False):
-    train(config, algo="dapo", profile_mode=profile)
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algo", type=str, required=True,
-                        choices=["grpo", "dr_grpo", "dapo"])
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--profile", action="store_true")
 
@@ -825,7 +658,7 @@ def main():
     if args.output_dir is not None:
         config["logging"]["output_dir"] = args.output_dir
 
-    train(config, algo=args.algo, profile_mode=args.profile)
+    train(config, profile_mode=args.profile)
 
 
 if __name__ == "__main__":
