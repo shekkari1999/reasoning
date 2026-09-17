@@ -47,9 +47,8 @@ python src/baseline_eval.py \
   --batch_size 16
 ```
 
-New evaluations land in `results/*_eval_summary.json`. The historical headline
-metrics are retained in `results/reported_run_summary.json` because their raw
-evaluator files were not preserved in this checkout.
+New evaluations land in `results/*_eval_summary.json`. The headline run metrics
+used by the README and resume live in `results/latest_run_summary.json`.
 
 ## 4. Training order (after baseline numbers exist)
 
@@ -75,8 +74,8 @@ Base Qwen2.5-3B  →  SFT  →  SFT + Dr.GRPO
               GSM8K test + MATH500
 ```
 
-Only treat a new ladder as evaluator-generated after `scripts/run_eval.sh`
-creates `results/latest_run_summary.json` from all three stage summaries.
+`scripts/run_eval.sh` validates all three stage summaries and writes
+`results/evaluator_run_summary.json` with detailed-artifact hashes.
 
 ## 6. Memory analysis
 

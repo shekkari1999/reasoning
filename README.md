@@ -22,7 +22,6 @@ checkpointing.
 | SFT | 71.2% | 33.1% |
 | Dr.GRPO | 78.2% | 45.6% |
 
-
 ## Stack
 
 Python, PyTorch, FSDP, Hugging Face Transformers

@@ -41,4 +41,4 @@ fi
 
 echo ""
 echo "=== All evaluations complete. Results in results/ ==="
-echo "  Canonical summary: results/latest_run_summary.json"
+echo "  Evaluator summary: results/evaluator_run_summary.json"

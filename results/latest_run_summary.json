@@ -1,0 +1,47 @@
+{
+  "run": {
+    "name": "qwen2.5-3b-sft-drgrpo",
+    "status": "completed"
+  },
+  "model": {
+    "base": "Qwen/Qwen2.5-3B",
+    "parameters_billion": 3.0
+  },
+  "training": {
+    "pipeline": [
+      "base",
+      "supervised_fine_tuning",
+      "dr_grpo"
+    ],
+    "sft_dataset": "open-r1/OpenR1-Math-220k",
+    "sft_samples": 10000,
+    "rl_dataset": "openai/gsm8k",
+    "precision": "bf16",
+    "distributed_strategy": "FSDP",
+    "gpus": 2,
+    "gpu_memory_gb_each": 96,
+    "peak_gpu_utilization_percent": 86
+  },
+  "evaluation": {
+    "prompt_mode": "sft",
+    "decoding": "greedy",
+    "benchmarks": {
+      "gsm8k": {
+        "split": "test",
+        "accuracy_percent": {
+          "base": 63.2,
+          "sft": 71.2,
+          "dr_grpo": 78.2
+        }
+      },
+      "math500": {
+        "split": "test",
+        "accuracy_percent": {
+          "base": 26.3,
+          "sft": 33.1,
+          "dr_grpo": 45.6
+        }
+      }
+    }
+  }
+}

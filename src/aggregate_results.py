@@ -102,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_dir", type=Path, default=Path("results"))
     parser.add_argument(
-        "--output", type=Path, default=Path("results/latest_run_summary.json")
+        "--output", type=Path, default=Path("results/evaluator_run_summary.json")
     )
     args = parser.parse_args()
 
