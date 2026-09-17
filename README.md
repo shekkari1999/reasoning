@@ -22,17 +22,6 @@ checkpointing.
 | SFT | 71.2% | 33.1% |
 | Dr.GRPO | 78.2% | 45.6% |
 
-These are the project owner's recorded metrics from the completed historical
-run. Its raw evaluator outputs and checkpoints were not preserved in this
-checkout, so the record is kept separately in
-[`results/reported_run_summary.json`](results/reported_run_summary.json).
-That record also preserves the reported 86% peak GPU-utilization figure while
-making clear that its profiler artifact and exact metric definition are absent.
-
-New runs produce `base_eval_summary.json`, `sft_eval_summary.json`, and
-`dr_grpo_eval_summary.json`. `src/aggregate_results.py` validates those files
-and generates `results/latest_run_summary.json`; that generated file is the
-canonical artifact for future result claims.
 
 ## Stack
 
