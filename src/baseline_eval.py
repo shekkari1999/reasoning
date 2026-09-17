@@ -9,10 +9,13 @@ Usage:
     python src/baseline_eval.py --model checkpoints/sft/final/step_625 --dataset both --prompt_mode sft
 """
 
+import argparse
 import json
+import platform
+import subprocess
 import sys
 import time
-import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -20,14 +23,12 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.rewards import (
-    extract_answer_boxed,
-    extract_answer_gsm8k,
-    extract_model_answer,
-    normalize_answer,
-)
 from src.profiling_utils import get_visible_gpu_memory, log_memory, reset_peak_memory
-
+from src.rewards import (
+    compute_reward,
+    extract_model_answer,
+    extract_raw_model_answer,
+)
 
 # ---------------------------------------------------------------------------
 # Prompt formatting
@@ -120,24 +121,23 @@ def evaluate(model, tokenizer, examples, dataset, prompt_mode="base",
         completions = generate_batch(model, tokenizer, prompts, max_new_tokens)
 
         for ex, completion in zip(batch, completions):
-            pred = extract_model_answer(completion)
-            if dataset == "gsm8k":
-                gt = extract_answer_gsm8k(ex["raw_answer"])
-            else:
-                gt = extract_answer_boxed(ex["raw_answer"])
-                if gt is None:
-                    gt = normalize_answer(ex["raw_answer"])
-
-            is_correct = pred is not None and gt is not None and pred == gt
+            pred = (
+                extract_raw_model_answer(completion)
+                if dataset == "math500"
+                else extract_model_answer(completion)
+            )
+            is_correct = compute_reward(
+                completion, ex["raw_answer"], dataset=dataset
+            ) == 1.0
             if is_correct:
                 correct += 1
 
             results.append({
                 "question": ex["question"],
-                "ground_truth": gt,
+                "ground_truth": ex["raw_answer"],
                 "predicted": pred,
                 "correct": is_correct,
-                "completion": completion[:500],
+                "completion": completion,
             })
 
         done = min(i + batch_size, total)
@@ -166,6 +166,15 @@ def evaluate(model, tokenizer, examples, dataset, prompt_mode="base",
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B")
+    parser.add_argument("--model_revision", type=str, default=None)
+    parser.add_argument(
+        "--gsm8k_revision", type=str,
+        default="740312add88f781978c0658806c59bc2815b9866",
+    )
+    parser.add_argument(
+        "--math500_revision", type=str,
+        default="6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+    )
     parser.add_argument("--dataset", type=str, default="both",
                         choices=["gsm8k", "math500", "both"])
     parser.add_argument("--prompt_mode", type=str, default="sft",
@@ -179,19 +188,28 @@ def main():
     parser.add_argument("--output_dir", type=str, default="results")
     parser.add_argument("--stage", type=str, default="base",
                         help="Output label, for example: base, sft, or dr_grpo")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    torch.manual_seed(args.seed)
+
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        git_commit = None
 
     # Load model
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
     print(f"Loading {args.model} ({args.dtype})...")
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model, trust_remote_code=True)
+        args.model, revision=args.model_revision, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=dtype, device_map="auto",
-        trust_remote_code=True,
+        revision=args.model_revision, trust_remote_code=True,
     )
     model.eval()
     print(f"Loaded. Params: {sum(p.numel() for p in model.parameters())/1e9:.2f}B")
@@ -200,8 +218,17 @@ def main():
 
     # Load datasets
     datasets_to_eval = []
+    dataset_provenance = {}
     if args.dataset in ("gsm8k", "both"):
-        raw = load_dataset("openai/gsm8k", "main", split="test")
+        raw = load_dataset(
+            "openai/gsm8k", "main", split="test",
+            revision=args.gsm8k_revision,
+        )
+        dataset_provenance["gsm8k"] = {
+            "name": "openai/gsm8k",
+            "revision": args.gsm8k_revision,
+            "fingerprint": getattr(raw, "_fingerprint", None),
+        }
         data = [{"question": r["question"], "raw_answer": r["answer"],
                  "dataset": "gsm8k"} for r in raw]
         if args.max_samples > 0:
@@ -209,7 +236,15 @@ def main():
         datasets_to_eval.append(("gsm8k", data))
 
     if args.dataset in ("math500", "both"):
-        raw = load_dataset("HuggingFaceH4/MATH-500", split="test")
+        raw = load_dataset(
+            "HuggingFaceH4/MATH-500", split="test",
+            revision=args.math500_revision,
+        )
+        dataset_provenance["math500"] = {
+            "name": "HuggingFaceH4/MATH-500",
+            "revision": args.math500_revision,
+            "fingerprint": getattr(raw, "_fingerprint", None),
+        }
         data = [{"question": r["problem"], "raw_answer": r["answer"],
                  "dataset": "math500"} for r in raw]
         if args.max_samples > 0:
@@ -239,10 +274,18 @@ def main():
     memory = get_visible_gpu_memory()
     save_data = {
         "model": args.model,
+        "model_revision": args.model_revision,
         "stage": args.stage,
         "prompt_mode": args.prompt_mode,
         "dtype": args.dtype,
         "batch_size": args.batch_size,
+        "max_new_tokens": args.max_new_tokens,
+        "seed": args.seed,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git_commit": git_commit,
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "datasets": dataset_provenance,
         "memory": {
             "peak_gb_per_gpu": [g["peak_gb"] for g in memory],
             "peak_gb_max": max((g["peak_gb"] for g in memory), default=0.0),

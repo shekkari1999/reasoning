@@ -1,9 +1,12 @@
 # SFT Config — Qwen-2.5-3B on 2×96GB (g7e.12xlarge)
 # Chain-of-thought supervised fine-tuning
 
+seed: 42
+
 model:
   name: "Qwen/Qwen2.5-3B"
   dtype: "bf16"
+  revision: "3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
 
 training:
   micro_batch_size: 1
@@ -11,7 +14,7 @@ training:
   # Effective batch = 1 × 8 × 2 GPUs = 16
   # mb=1 at seq_len=4096 (~45-50 GB/GPU peak, ~12-15h for 625 steps)
   seq_len: 4096
-  num_steps: 625          # 1 epoch over 10k subset (625 × 16 = 10,000 samples)
+  num_steps: 625          # 10,000 sample slots at effective batch 16
   warmup_steps: 63        # ~10% warmup
 
 optimizer:
@@ -35,9 +38,8 @@ data:
   dataset: "open-r1/OpenR1-Math-220k"
   subset: "default"
   split: "train"
+  revision: "e4e141ec9dea9f8326f4d347be56105859b2bd68"
   max_samples: 10000  # subset for weekend project
-  think_tag: "<think>"
-  answer_tag: "<answer>"
 
 logging:
   log_every: 10
@@ -45,6 +47,5 @@ logging:
   output_dir: "checkpoints/sft"
 
 profiling:
-  enabled: false  # toggle for nsys runs
   warmup_steps: 10
   capture_steps: 20

@@ -22,20 +22,14 @@ def get_per_token_logprobs(
     return token_log_probs * shift_mask
 
 
-def sequence_logprobs(
-    per_token_logprobs: torch.Tensor,
+def build_completion_mask(
     attention_mask: torch.Tensor,
-    prompt_lens: torch.Tensor,
+    prompt_width: int,
 ) -> torch.Tensor:
-    """Sum log probabilities over completion tokens only."""
-    shift_mask = attention_mask[:, 1:]
-    positions = torch.arange(
-        shift_mask.shape[1], device=shift_mask.device
-    ).unsqueeze(0)
-    completion_mask = (
-        positions >= (prompt_lens.unsqueeze(1) - 1)
-    ) & shift_mask.bool()
-    return (per_token_logprobs * completion_mask).sum(dim=-1)
+    """Mask shifted-token positions that belong to generated completions."""
+    shift_mask = attention_mask[:, 1:].bool()
+    positions = torch.arange(shift_mask.shape[1], device=shift_mask.device)
+    return shift_mask & (positions.unsqueeze(0) >= prompt_width - 1)
 
 
 def compute_advantages_dr_grpo(rewards: torch.Tensor) -> torch.Tensor:
@@ -47,27 +41,32 @@ def dr_grpo_loss(
     policy_model,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-    old_logprobs: torch.Tensor,
+    old_per_token_logprobs: torch.Tensor,
     advantages: torch.Tensor,
-    prompt_lens: torch.Tensor,
+    completion_mask: torch.Tensor,
+    max_completion_length: int,
     clip_eps: float = 0.2,
 ) -> dict:
-    """Compute the clipped Dr.GRPO surrogate loss without a KL term."""
+    """Compute token-level clipped Dr.GRPO with a fixed-length denominator."""
     new_per_token = get_per_token_logprobs(
         policy_model, input_ids, attention_mask
     )
-    new_logprobs = sequence_logprobs(
-        new_per_token, attention_mask, prompt_lens
-    )
-
-    ratio = torch.exp(new_logprobs - old_logprobs)
+    ratio = torch.exp(new_per_token - old_per_token_logprobs)
     clipped_ratio = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
-    surrogate = -torch.min(
-        ratio * advantages, clipped_ratio * advantages
-    ).mean()
+    token_advantages = advantages.unsqueeze(1)
+    per_token_loss = -torch.min(
+        ratio * token_advantages,
+        clipped_ratio * token_advantages,
+    )
+    mask = completion_mask.to(per_token_loss.dtype)
+    denominator = input_ids.shape[0] * max_completion_length
+    surrogate = (per_token_loss * mask).sum() / denominator
+    valid_tokens = mask.sum().clamp_min(1.0)
+    clipped = (torch.abs(ratio - 1.0) > clip_eps).to(mask.dtype)
 
     return {
         "loss": surrogate,
         "surrogate_loss": surrogate.detach(),
-        "ratio_mean": ratio.mean().detach(),
+        "ratio_mean": ((ratio * mask).sum() / valid_tokens).detach(),
+        "clipped_fraction": ((clipped * mask).sum() / valid_tokens).detach(),
     }

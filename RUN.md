@@ -12,7 +12,8 @@ pip install -r requirements.txt
 python tests/smoke_test.py
 ```
 
-If smoke tests pass, the reward logic and Dr.GRPO loss math are wired correctly.
+The smoke tests exercise the production Dr.GRPO objective, completion masking,
+deterministic sampling, reward logic, and result aggregation.
 
 ## 2. GPU to rent
 
@@ -46,8 +47,9 @@ python src/baseline_eval.py \
   --batch_size 16
 ```
 
-New evaluations land in `results/*_eval_summary.json`. The committed updated-run
-headline metrics live in `results/latest_run_summary.json`.
+New evaluations land in `results/*_eval_summary.json`. The historical headline
+metrics are retained in `results/reported_run_summary.json` because their raw
+evaluator files were not preserved in this checkout.
 
 ## 4. Training order (after baseline numbers exist)
 
@@ -73,7 +75,8 @@ Base Qwen2.5-3B  →  SFT  →  SFT + Dr.GRPO
               GSM8K test + MATH500
 ```
 
-Only claim numbers that appear in `results/*_eval_summary.json`.
+Only treat a new ladder as evaluator-generated after `scripts/run_eval.sh`
+creates `results/latest_run_summary.json` from all three stage summaries.
 
 ## 6. Memory analysis
 

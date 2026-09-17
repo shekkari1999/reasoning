@@ -1,11 +1,12 @@
 """CUDA capture, memory reporting, and training-metric utilities."""
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 import torch
-
 
 # ---------------------------------------------------------------------------
 # CUDA Profiler control
@@ -66,7 +67,7 @@ def log_memory(tag: str = "", device: int = 0):
           f"Peak: {max_allocated:.2f}GB")
 
 
-def get_memory_stats(device: int = None) -> dict:
+def get_memory_stats(device: int | None = None) -> dict:
     """Get memory stats as a dict for logging."""
     if device is None:
         device = torch.cuda.current_device()

@@ -8,16 +8,16 @@ Handles two answer formats:
   - Model:   "<answer>...</answer>" (after SFT)
 """
 
-import re
-import math
-from typing import Optional
+from __future__ import annotations
 
+import math
+import re
 
 # ---------------------------------------------------------------------------
 # Answer extraction
 # ---------------------------------------------------------------------------
 
-def extract_answer_gsm8k(text: str) -> Optional[str]:
+def extract_answer_gsm8k(text: str) -> str | None:
     """Extract final numeric answer from GSM8K ground-truth format: #### <number>"""
     match = re.search(r"####\s*(.+)", text)
     if match:
@@ -25,7 +25,7 @@ def extract_answer_gsm8k(text: str) -> Optional[str]:
     return None
 
 
-def extract_answer_boxed(text: str) -> Optional[str]:
+def extract_answer_boxed(text: str) -> str | None:
     """Extract answer from \\boxed{...} (MATH benchmark format).
     Handles nested braces."""
     idx = text.rfind("\\boxed{")
@@ -44,7 +44,7 @@ def extract_answer_boxed(text: str) -> Optional[str]:
     return None
 
 
-def extract_answer_tags(text: str) -> Optional[str]:
+def extract_answer_tags(text: str) -> str | None:
     """Extract answer from <answer>...</answer> tags (our SFT/RL format)."""
     match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
     if match:
@@ -52,7 +52,30 @@ def extract_answer_tags(text: str) -> Optional[str]:
     return None
 
 
-def extract_model_answer(text: str) -> Optional[str]:
+def extract_raw_model_answer(text: str) -> str | None:
+    """Extract an answer without destroying LaTeX needed by math verification."""
+    match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    idx = text.rfind("\\boxed{")
+    if idx != -1:
+        depth = 0
+        start = idx + len("\\boxed{")
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                if depth == 0:
+                    return text[start:i].strip()
+                depth -= 1
+    matches = re.findall(r"-?\d+(?:\.\d+)?(?:/\d+)?", text)
+    if matches:
+        return matches[-1]
+    return None
+
+
+def extract_model_answer(text: str) -> str | None:
     """Try all extraction methods in priority order."""
     answer = extract_answer_tags(text)
     if answer is not None:
@@ -69,7 +92,7 @@ def extract_model_answer(text: str) -> Optional[str]:
     return extract_last_number(text)
 
 
-def extract_last_number(text: str) -> Optional[str]:
+def extract_last_number(text: str) -> str | None:
     """Fallback: extract the last standalone number from text."""
     matches = re.findall(r"-?\d+(?:\.\d+)?(?:/\d+)?", text)
     if matches:
@@ -100,7 +123,7 @@ def normalize_answer(text: str) -> str:
     return text.lower()
 
 
-def normalize_numeric(text: str) -> Optional[str]:
+def normalize_numeric(text: str) -> str | None:
     """Normalize a numeric string: remove commas, evaluate fractions, round."""
     text = text.strip().replace(",", "").replace(" ", "")
 
@@ -139,18 +162,25 @@ def compute_reward(completion: str, ground_truth: str, dataset: str = "gsm8k") -
     Returns:
         1.0 if correct, 0.0 if incorrect
     """
-    pred = extract_model_answer(completion)
-    if pred is None:
-        return 0.0
-
     if dataset == "gsm8k":
+        pred = extract_model_answer(completion)
         gt = extract_answer_gsm8k(ground_truth)
     elif dataset in ("math500", "math"):
-        gt = extract_answer_boxed(ground_truth)
+        pred = extract_raw_model_answer(completion)
+        gt = extract_raw_model_answer(ground_truth) or ground_truth
+        if pred is None:
+            return 0.0
+        try:
+            from math_verify import parse, verify
+            return 1.0 if verify(parse(gt), parse(pred)) else 0.0
+        except Exception:  # noqa: BLE001 - parser input is untrusted model text
+            # Invalid model-generated math should score zero, not abort a run.
+            return 0.0
     else:
+        pred = extract_model_answer(completion)
         gt = normalize_answer(ground_truth)
 
-    if gt is None:
+    if pred is None or gt is None:
         return 0.0
 
     return 1.0 if pred == gt else 0.0

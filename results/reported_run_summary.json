@@ -1,0 +1,25 @@
+{
+  "provenance": "owner_reported_historical_run",
+  "artifact_status": "raw evaluator outputs and checkpoints were not preserved in this checkout",
+  "model": "Qwen/Qwen2.5-3B",
+  "aggregation_details": "not preserved",
+  "reported_training": {
+    "sft_samples": 10000,
+    "gpus": 2,
+    "gpu_memory_gb_each": 96,
+    "peak_gpu_utilization_percent": 86,
+    "utilization_metric_definition": "not preserved"
+  },
+  "accuracy_percent": {
+    "gsm8k": {
+      "base": 63.2,
+      "sft": 71.2,
+      "dr_grpo": 78.2
+    },
+    "math500": {
+      "base": 26.3,
+      "sft": 33.1,
+      "dr_grpo": 45.6
+    }
+  }
+}

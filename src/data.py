@@ -7,12 +7,14 @@ Provides:
   - Collator functions for batching
 """
 
-import random
-import torch
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
-from transformers import AutoTokenizer
-from datasets import load_dataset
+from __future__ import annotations
 
+import random
+
+import torch
+from datasets import load_dataset
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from transformers import AutoTokenizer
 
 # ---------------------------------------------------------------------------
 # SFT Dataset
@@ -25,7 +27,7 @@ SYSTEM_PROMPT = (
 )
 
 
-def format_sft_example(question: str, reasoning: str, answer: str) -> str:
+def format_sft_example(reasoning: str, answer: str) -> str:
     """Format a single SFT training example.
     
     Target format:
@@ -35,6 +37,13 @@ def format_sft_example(question: str, reasoning: str, answer: str) -> str:
         <answer>{answer}</answer>
     """
     return f"<think>\n{reasoning}\n</think>\n<answer>{answer}</answer>"
+
+
+def deterministic_sample_indices(size: int, max_samples: int, seed: int) -> list[int]:
+    """Return the same subset on every distributed rank."""
+    if max_samples <= 0 or size <= max_samples:
+        return list(range(size))
+    return random.Random(seed).sample(range(size), max_samples)
 
 
 def format_sft_prompt(question: str) -> str:
@@ -59,17 +68,20 @@ class SFTDataset(Dataset):
         split: str = "train",
         max_samples: int = 10000,
         max_seq_len: int = 1024,
+        seed: int = 42,
+        revision: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
 
         print(f"Loading SFT dataset: {dataset_name} ({split}, max_samples={max_samples})")
-        raw = load_dataset(dataset_name, subset, split=split)
+        raw = load_dataset(dataset_name, subset, split=split, revision=revision)
+        self.source_size = len(raw)
+        self.sample_indices = deterministic_sample_indices(len(raw), max_samples, seed)
+        self.dataset_fingerprint = getattr(raw, "_fingerprint", None)
+        raw = raw.select(self.sample_indices)
 
-        if max_samples > 0 and len(raw) > max_samples:
-            indices = random.sample(range(len(raw)), max_samples)
-            raw = raw.select(indices)
-
+        self.usable_sample_indices = []
         self.examples = self._process_dataset(raw, dataset_name)
         print(f"SFT dataset ready: {len(self.examples)} examples")
 
@@ -77,7 +89,7 @@ class SFTDataset(Dataset):
         """Process raw HF dataset into tokenized examples."""
         examples = []
 
-        for row in raw:
+        for local_index, row in enumerate(raw):
             try:
                 prompt, completion = self._extract_prompt_completion(row, dataset_name)
             except (KeyError, ValueError, IndexError):
@@ -93,14 +105,10 @@ class SFTDataset(Dataset):
             # Add EOS token at the end of completion
             completion_ids = completion_ids + [self.tokenizer.eos_token_id]
 
-            # Truncate to max_seq_len
+            # Never truncate away the answer or EOS token.
             total_len = len(prompt_ids) + len(completion_ids)
             if total_len > self.max_seq_len:
-                # Truncate completion, keep full prompt
-                max_completion = self.max_seq_len - len(prompt_ids)
-                if max_completion < 32:  # too short to be useful
-                    continue
-                completion_ids = completion_ids[:max_completion]
+                continue
 
             input_ids = prompt_ids + completion_ids
 
@@ -111,6 +119,7 @@ class SFTDataset(Dataset):
                 "input_ids": input_ids,
                 "labels": labels,
             })
+            self.usable_sample_indices.append(self.sample_indices[local_index])
 
         return examples
 
@@ -133,14 +142,19 @@ class SFTDataset(Dataset):
                         solution = msg["content"]
                 if question and solution:
                     prompt = format_sft_prompt(question)
-                    return prompt, solution
+                    if "<think>" in solution and "<answer>" in solution:
+                        return prompt, solution
+                    answer = row.get("answer")
+                    if answer:
+                        return prompt, format_sft_example(solution, answer)
 
             # Direct fields
             question = row.get("problem", row.get("question", None))
-            solution = row.get("solution", row.get("answer", None))
-            if question and solution:
+            solution = row.get("solution")
+            answer = row.get("answer")
+            if question and solution and answer:
                 prompt = format_sft_prompt(question)
-                return prompt, solution
+                return prompt, format_sft_example(solution, answer)
 
         elif "gsm8k" in dataset_name.lower():
             question = row["question"]
@@ -152,7 +166,7 @@ class SFTDataset(Dataset):
             if len(parts) == 2:
                 reasoning = parts[0].strip()
                 answer = parts[1].strip()
-                completion = format_sft_example(question, reasoning, answer)
+                completion = format_sft_example(reasoning, answer)
                 return prompt, completion
 
         raise ValueError(f"Could not extract from row with keys: {row.keys()}")
@@ -218,26 +232,30 @@ class RLPromptDataset(Dataset):
         split: str = "train",
         max_samples: int = 0,
         max_prompt_len: int = 256,
+        seed: int = 42,
+        revision: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.max_prompt_len = max_prompt_len
 
         print(f"Loading RL prompts: {dataset_name} ({split})")
-        raw = load_dataset(dataset_name, "main", split=split)
-
-        if max_samples > 0 and len(raw) > max_samples:
-            indices = random.sample(range(len(raw)), max_samples)
-            raw = raw.select(indices)
+        subset = "main" if "gsm8k" in dataset_name.lower() else None
+        raw = load_dataset(dataset_name, subset, split=split, revision=revision)
+        self.source_size = len(raw)
+        self.sample_indices = deterministic_sample_indices(len(raw), max_samples, seed)
+        self.dataset_fingerprint = getattr(raw, "_fingerprint", None)
+        raw = raw.select(self.sample_indices)
 
         self.examples = []
-        for row in raw:
+        self.usable_sample_indices = []
+        for local_index, row in enumerate(raw):
             question = row.get("question", row.get("problem", ""))
             answer = row.get("answer", "")
             prompt = format_sft_prompt(question)
             prompt_ids = tokenizer.encode(prompt, add_special_tokens=True)
 
             if len(prompt_ids) > max_prompt_len:
-                prompt_ids = prompt_ids[:max_prompt_len]
+                continue
 
             self.examples.append({
                 "prompt_ids": prompt_ids,
@@ -245,6 +263,7 @@ class RLPromptDataset(Dataset):
                 "question": question,
                 "raw_answer": answer,  # for reward computation
             })
+            self.usable_sample_indices.append(self.sample_indices[local_index])
 
         print(f"RL prompt dataset ready: {len(self.examples)} prompts")
 
@@ -297,6 +316,8 @@ def create_sft_dataloader(
     micro_batch_size: int = 2,
     num_workers: int = 4,
     distributed: bool = True,
+    seed: int = 42,
+    revision: str | None = None,
 ) -> DataLoader:
     """Create DataLoader for SFT training."""
     dataset = SFTDataset(
@@ -306,9 +327,11 @@ def create_sft_dataloader(
         split=split,
         max_samples=max_samples,
         max_seq_len=max_seq_len,
+        seed=seed,
+        revision=revision,
     )
 
-    sampler = DistributedSampler(dataset, shuffle=True) if distributed else None
+    sampler = DistributedSampler(dataset, shuffle=True, seed=seed) if distributed else None
     collator = SFTCollator(tokenizer, max_seq_len=max_seq_len)
 
     return DataLoader(
@@ -332,6 +355,8 @@ def create_rl_dataloader(
     batch_size: int = 4,
     num_workers: int = 4,
     distributed: bool = True,
+    seed: int = 42,
+    revision: str | None = None,
 ) -> DataLoader:
     """Create DataLoader for RL training (prompts only)."""
     dataset = RLPromptDataset(
@@ -340,9 +365,11 @@ def create_rl_dataloader(
         split=split,
         max_samples=max_samples,
         max_prompt_len=max_prompt_len,
+        seed=seed,
+        revision=revision,
     )
 
-    sampler = DistributedSampler(dataset, shuffle=True) if distributed else None
+    sampler = DistributedSampler(dataset, shuffle=True, seed=seed) if distributed else None
     collator = RLPromptCollator(tokenizer)
 
     return DataLoader(

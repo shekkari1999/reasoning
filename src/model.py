@@ -6,25 +6,26 @@ Provides:
   - wrap_model_fsdp(): Wrap with FSDP, mixed precision, activation checkpointing
 """
 
+from __future__ import annotations
+
 import functools
-from typing import Optional
 
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
+)
+from torch.distributed.fsdp import (
     MixedPrecision,
     ShardingStrategy,
 )
+from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
 from torch.distributed.fsdp.wrap import (
     transformer_auto_wrap_policy,
 )
-from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
-
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.profiling_utils import log_memory
-
 
 # ---------------------------------------------------------------------------
 # Model loading
@@ -33,7 +34,8 @@ from src.profiling_utils import log_memory
 def load_model(
     model_name: str = "Qwen/Qwen2.5-3B",
     dtype: torch.dtype = torch.bfloat16,
-    checkpoint_path: Optional[str] = None,
+    checkpoint_path: str | None = None,
+    revision: str | None = None,
 ) -> AutoModelForCausalLM:
     """Load Qwen model. Optionally from a local checkpoint.
     
@@ -51,6 +53,7 @@ def load_model(
             checkpoint_path,
             torch_dtype=dtype,
             trust_remote_code=True,
+            revision=revision,
         )
     else:
         print(f"Loading model: {model_name}")
@@ -58,6 +61,7 @@ def load_model(
             model_name,
             torch_dtype=dtype,
             trust_remote_code=True,
+            revision=revision,
         )
 
     params = sum(p.numel() for p in model.parameters()) / 1e9
@@ -65,9 +69,14 @@ def load_model(
     return model
 
 
-def load_tokenizer(model_name: str = "Qwen/Qwen2.5-3B") -> AutoTokenizer:
+def load_tokenizer(
+    model_name: str = "Qwen/Qwen2.5-3B",
+    revision: str | None = None,
+) -> AutoTokenizer:
     """Load tokenizer with proper padding config."""
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, revision=revision, trust_remote_code=True
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # for batch generation
@@ -162,37 +171,6 @@ def wrap_model_fsdp(
 # Checkpoint saving/loading
 # ---------------------------------------------------------------------------
 
-def save_checkpoint(
-    model: FSDP,
-    optimizer: torch.optim.Optimizer,
-    step: int,
-    output_dir: str,
-    rank: int = 0,
-):
-    """Save FSDP model checkpoint.
-    
-    Uses FULL_STATE_DICT — gathers sharded params to rank 0 and saves.
-    Only rank 0 actually writes to disk.
-    """
-    from pathlib import Path
-    save_dir = Path(output_dir) / f"step_{step}"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # Gather full state dict to rank 0
-    full_sd_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, full_sd_config):
-        state_dict = model.state_dict()
-
-    if rank == 0:
-        # Save as HuggingFace format for easy loading
-        # Need to unwrap FSDP to get the underlying model for save_pretrained
-        torch.save(state_dict, save_dir / "pytorch_model.bin")
-        print(f"[Rank 0] Checkpoint saved to {save_dir}")
-
-    # Barrier to ensure save completes before any rank continues
-    dist.barrier()
-
-
 def save_hf_checkpoint(
     model: FSDP,
     tokenizer: AutoTokenizer,
@@ -200,6 +178,7 @@ def save_hf_checkpoint(
     output_dir: str,
     model_name: str = "Qwen/Qwen2.5-3B",
     rank: int = 0,
+    model_revision: str | None = None,
 ):
     """Save as HuggingFace-compatible checkpoint for easy eval/loading."""
     from pathlib import Path
@@ -213,7 +192,8 @@ def save_hf_checkpoint(
     if rank == 0:
         # Load a fresh model on CPU and inject the state dict
         hf_model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
+            model_name, revision=model_revision,
+            torch_dtype=torch.bfloat16, trust_remote_code=True
         )
         hf_model.load_state_dict(state_dict)
         hf_model.save_pretrained(save_dir)

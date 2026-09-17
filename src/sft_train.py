@@ -22,30 +22,30 @@ Usage:
         torchrun --nproc_per_node=2 src/sft_train.py --config configs/sft_config.yaml --profile
 """
 
+import argparse
+import json
+import math
 import os
 import sys
-import math
-import argparse
 from pathlib import Path
 
-import yaml
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
+import torch.nn.functional as F
+import yaml
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.model import load_model, load_tokenizer, wrap_model_fsdp, save_hf_checkpoint
 from src.data import create_sft_dataloader
+from src.model import load_model, load_tokenizer, save_hf_checkpoint, wrap_model_fsdp
 from src.profiling_utils import (
-    ProfilerControl,
     MetricTracker,
+    ProfilerControl,
+    gather_all_gpu_memory,
     log_memory,
     reset_peak_memory,
-    gather_all_gpu_memory,
     save_memory_report,
 )
-
 
 # ---------------------------------------------------------------------------
 # Learning rate schedule
@@ -137,10 +137,13 @@ def train_step(
 def train(config: dict, profile_mode: bool = False):
     # ---- Distributed setup ----
     dist.init_process_group("nccl")
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    seed = config.get("seed", 42)
+    torch.manual_seed(seed + rank)
+    torch.cuda.manual_seed_all(seed + rank)
 
     # ---- Config ----
     model_name = config["model"]["name"]
@@ -174,8 +177,9 @@ def train(config: dict, profile_mode: bool = False):
         print(f"{'='*60}")
 
     # ---- Load model & tokenizer ----
-    tokenizer = load_tokenizer(model_name)
-    model = load_model(model_name, dtype=torch.bfloat16)
+    model_revision = config["model"].get("revision")
+    tokenizer = load_tokenizer(model_name, revision=model_revision)
+    model = load_model(model_name, dtype=torch.bfloat16, revision=model_revision)
     vocab_size = model.config.vocab_size
 
     # ---- FSDP wrap ----
@@ -209,7 +213,28 @@ def train(config: dict, profile_mode: bool = False):
         micro_batch_size=micro_batch_size,
         num_workers=4,
         distributed=True,
+        seed=seed,
+        revision=config["data"].get("revision"),
     )
+
+    if rank == 0:
+        dataset = dataloader.dataset
+        manifest = {
+            "dataset": config["data"]["dataset"],
+            "subset": config["data"].get("subset", "default"),
+            "split": config["data"]["split"],
+            "revision": config["data"].get("revision"),
+            "fingerprint": dataset.dataset_fingerprint,
+            "source_size": dataset.source_size,
+            "selected_size": len(dataset.sample_indices),
+            "usable_size": len(dataset),
+            "seed": seed,
+            "sample_indices": dataset.sample_indices,
+            "usable_sample_indices": dataset.usable_sample_indices,
+        }
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(output_dir) / "dataset_manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
 
     # ---- Profiling setup ----
     profiler = ProfilerControl(
@@ -226,6 +251,7 @@ def train(config: dict, profile_mode: bool = False):
     # ---- Training loop ----
     data_iter = iter(dataloader)
     model.train()
+    tokens_seen = 0
 
     for step in range(num_steps):
         profiler.step(step)
@@ -238,6 +264,7 @@ def train(config: dict, profile_mode: bool = False):
         set_lr(optimizer, lr)
 
         step_loss = 0.0
+        step_tokens = 0
 
         # ---- Gradient accumulation ----
         for micro_step in range(accum_steps):
@@ -257,13 +284,14 @@ def train(config: dict, profile_mode: bool = False):
                 profile=profile_mode,
             )
             step_loss += result["loss"].item()
+            step_tokens += int((batch["labels"][:, 1:] != -100).sum().item())
 
         # ---- Optimizer step ----
         if profile_mode:
             torch.cuda.nvtx.range_push("optimizer_step")
 
         # Gradient clipping
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        grad_norm = model.clip_grad_norm_(1.0)
 
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -272,8 +300,15 @@ def train(config: dict, profile_mode: bool = False):
             torch.cuda.nvtx.range_pop()  # optimizer_step
             torch.cuda.nvtx.range_pop()  # SFT_step
 
+        loss_tensor = torch.tensor(step_loss / accum_steps, device=local_rank)
+        dist.reduce(loss_tensor, dst=0, op=dist.ReduceOp.SUM)
+        tokens_tensor = torch.tensor(step_tokens, device=local_rank)
+        dist.reduce(tokens_tensor, dst=0, op=dist.ReduceOp.SUM)
+
         # ---- Logging ----
         if rank == 0:
+            step_loss = loss_tensor.item() / world_size
+            tokens_seen += int(tokens_tensor.item())
             tracker.update(
                 step=step,
                 loss=step_loss,
@@ -283,12 +318,11 @@ def train(config: dict, profile_mode: bool = False):
 
             if step % log_every == 0 or step == num_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1e9
-                tokens_seen = (step + 1) * effective_batch * seq_len
                 tracker.update(step=step, peak_mem_gb=mem, tokens_seen=tokens_seen)
                 tracker.log(step, prefix="SFT")
 
         # ---- Checkpointing ----
-        if (step + 1) % save_every == 0 or step == num_steps - 1:
+        if (step + 1) % save_every == 0 and step + 1 < num_steps:
             if rank == 0:
                 print(f"\n[Step {step}] Saving checkpoint...")
 
@@ -299,6 +333,7 @@ def train(config: dict, profile_mode: bool = False):
                 output_dir=output_dir,
                 model_name=model_name,
                 rank=rank,
+                model_revision=model_revision,
             )
 
     # ---- Final save ----
@@ -312,6 +347,7 @@ def train(config: dict, profile_mode: bool = False):
         output_dir=output_dir + "/final",
         model_name=model_name,
         rank=rank,
+        model_revision=model_revision,
     )
 
     # ---- Cleanup ----
@@ -327,6 +363,8 @@ def train(config: dict, profile_mode: bool = False):
             gpus=gpu_memory,
             extra={
                 "model": model_name,
+                "model_revision": model_revision,
+                "dataset_revision": config["data"].get("revision"),
                 "micro_batch_size": micro_batch_size,
                 "gradient_accumulation_steps": accum_steps,
                 "seq_len": seq_len,
@@ -335,7 +373,7 @@ def train(config: dict, profile_mode: bool = False):
         )
 
         print(f"\n{'='*60}")
-        print(f"SFT TRAINING COMPLETE")
+        print("SFT TRAINING COMPLETE")
         print(f"{'='*60}")
         print(f"  Steps: {num_steps}")
         print(f"  Final loss: {step_loss:.4f}")

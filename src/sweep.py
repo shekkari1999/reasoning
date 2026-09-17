@@ -1,5 +1,5 @@
 """
-Parameter Sweep — Find optimal training config for 2×A100 40GB.
+Parameter Sweep — Find a viable two-GPU SFT configuration.
 
 Runs short training bursts with different configs, measures:
   - Throughput (tokens/sec, samples/sec)
@@ -22,13 +22,13 @@ Usage:
         --micro_batch 2 --accum_steps 4 --seq_len 1024
 """
 
+import argparse
+import json
 import os
 import sys
-import json
 import time
-import argparse
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -38,7 +38,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.model import load_model, wrap_model_fsdp
 from src.profiling_utils import get_memory_stats
-
 
 # ---------------------------------------------------------------------------
 # Sweep configurations
@@ -68,12 +67,10 @@ class SweepConfig:
 
 # SFT sweep configs — varying batch size and seq length
 SFT_SWEEP_CONFIGS = [
-    SweepConfig(micro_batch_size=1, gradient_accumulation_steps=8, seq_len=1024),
+    SweepConfig(micro_batch_size=1, gradient_accumulation_steps=8, seq_len=4096),
+    SweepConfig(micro_batch_size=1, gradient_accumulation_steps=8, seq_len=2048),
+    SweepConfig(micro_batch_size=2, gradient_accumulation_steps=4, seq_len=2048),
     SweepConfig(micro_batch_size=2, gradient_accumulation_steps=4, seq_len=1024),
-    SweepConfig(micro_batch_size=4, gradient_accumulation_steps=2, seq_len=1024),
-    SweepConfig(micro_batch_size=2, gradient_accumulation_steps=4, seq_len=512),
-    SweepConfig(micro_batch_size=4, gradient_accumulation_steps=4, seq_len=512),
-    SweepConfig(micro_batch_size=2, gradient_accumulation_steps=8, seq_len=1024),
 ]
 
 # ---------------------------------------------------------------------------
@@ -157,7 +154,7 @@ def benchmark_config(
             # Optimizer step
             if nvtx_tag:
                 torch.cuda.nvtx.range_push("optimizer_step")
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            model.clip_grad_norm_(1.0)
             optimizer.step()
             optimizer.zero_grad()
             if nvtx_tag:
@@ -232,7 +229,6 @@ def run_sweep(
     mode: str,
     num_warmup: int = 3,
     num_steps: int = 10,
-    output_dir: str = "results",
 ) -> list[dict]:
     """Run sweep across all configs."""
     rank = dist.get_rank()
@@ -247,6 +243,7 @@ def run_sweep(
     vocab_size = model.config.vocab_size
 
     results = []
+    fsdp_model = None
 
     for i, config in enumerate(configs):
         if rank == 0:
@@ -279,7 +276,7 @@ def run_sweep(
 
         if rank == 0:
             if result["oom"]:
-                print(f"    RESULT: OOM")
+                print("    RESULT: OOM")
             else:
                 print(f"    RESULT: {result['tokens_per_sec']:,.0f} tok/s | "
                       f"{result['samples_per_sec']:.1f} samples/s | "
@@ -298,7 +295,7 @@ def print_sweep_report(results: list[dict], rank: int = 0):
         return
 
     print(f"\n{'='*90}")
-    print(f"SWEEP RESULTS")
+    print("SWEEP RESULTS")
     print(f"{'='*90}")
     print(f"{'Config':<35} {'tok/s':>10} {'samp/s':>8} {'step(s)':>8} "
           f"{'peak GB':>8} {'mem%':>6} {'OOM':>5}")
@@ -360,7 +357,7 @@ def main():
 
     # Init distributed
     dist.init_process_group("nccl")
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     rank = dist.get_rank()
 
@@ -376,7 +373,6 @@ def main():
         args.model, configs, args.mode,
         num_warmup=args.num_warmup,
         num_steps=args.num_steps,
-        output_dir=args.output_dir,
     )
 
     print_sweep_report(results, rank)

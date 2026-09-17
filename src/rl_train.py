@@ -8,42 +8,44 @@ Usage:
     torchrun --nproc_per_node=2 src/rl_train.py --config configs/dr_grpo_config.yaml
 """
 
+import argparse
+import json
+import math
 import os
 import sys
-import math
-import argparse
 from pathlib import Path
-from tqdm import tqdm
-import wandb
 
-import yaml
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
+import torch.nn.functional as F
+import wandb
+import yaml
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.model import (
-    load_model, load_tokenizer, wrap_model_fsdp,
-    save_hf_checkpoint,
-)
 from src.data import create_rl_dataloader
 from src.losses import (
-    get_per_token_logprobs,
-    sequence_logprobs,
+    build_completion_mask,
     compute_advantages_dr_grpo,
     dr_grpo_loss,
+    get_per_token_logprobs,
 )
-from src.rewards import compute_reward
+from src.model import (
+    load_model,
+    load_tokenizer,
+    save_hf_checkpoint,
+    wrap_model_fsdp,
+)
 from src.profiling_utils import (
-    ProfilerControl,
     MetricTracker,
+    ProfilerControl,
+    gather_all_gpu_memory,
     log_memory,
     reset_peak_memory,
-    gather_all_gpu_memory,
     save_memory_report,
 )
-
+from src.rewards import compute_reward
 
 # ---------------------------------------------------------------------------
 # LR schedule (same as SFT)
@@ -86,7 +88,7 @@ def generate_with_fsdp(
     top_p: float,
     pad_token_id: int,
     eos_token_id: int,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Autoregressive generation that works with FSDP.
 
     Calls model() directly (through FSDP's forward) so FSDP handles
@@ -95,6 +97,7 @@ def generate_with_fsdp(
 
     Returns:
         generated: (batch, prompt_len + generated_len) full token IDs
+        mask: attention mask with post-EOS padding excluded
     """
     device = input_ids.device
     batch_size = input_ids.shape[0]
@@ -103,6 +106,7 @@ def generate_with_fsdp(
     generated = input_ids
     cur_mask = attention_mask.clone()
     past_key_values = None
+    next_token = None
 
     for _ in range(max_new_tokens):
         if past_key_values is None:
@@ -132,7 +136,7 @@ def generate_with_fsdp(
 
     del past_key_values
     torch.cuda.empty_cache()
-    return generated
+    return generated, cur_mask
 
 
 # ---------------------------------------------------------------------------
@@ -168,22 +172,19 @@ def generate_rollouts(
         dict with:
             full_ids: (batch * G, full_seq_len) — prompt + completion
             full_mask: (batch * G, full_seq_len)
-            prompt_lens: (batch * G,) — original prompt lengths
             completions: list[str] — decoded completions
-            old_logprobs: (batch * G,) — sequence log-probs under current policy
+            old_per_token_logprobs: shifted token log-probs under current policy
     """
     if profile:
         torch.cuda.nvtx.range_push("rollout_generation")
 
     model.eval()
-    batch_size = prompt_ids.shape[0]
-
     # Expand each prompt G times: [p1, p1, p1, p1, p2, p2, p2, p2, ...]
     expanded_ids = prompt_ids.repeat_interleave(G, dim=0)       # (B*G, prompt_len)
     expanded_mask = attention_mask.repeat_interleave(G, dim=0)   # (B*G, prompt_len)
 
     # Generate through FSDP forward (not model.module.generate which bypasses FSDP)
-    output_ids = generate_with_fsdp(
+    output_ids, full_mask = generate_with_fsdp(
         model=model,
         input_ids=expanded_ids,
         attention_mask=expanded_mask,
@@ -194,33 +195,14 @@ def generate_rollouts(
         eos_token_id=tokenizer.eos_token_id,
     )
 
-    # Build full sequences and masks
-    full_seq_len = output_ids.shape[1]
-    full_mask = torch.ones_like(output_ids)
-
-    # Mark padding in the prompt region
-    prompt_len_per_seq = expanded_mask.sum(dim=1)  # actual prompt lengths (non-pad)
-    for i in range(output_ids.shape[0]):
-        pad_len = expanded_ids.shape[1] - prompt_len_per_seq[i].item()
-        if pad_len > 0:
-            full_mask[i, :pad_len] = 0
-
-    # Decode completions and apply stop strings
+    # Decode only the generated region. Loss masking stops at EOS.
     completions = []
-    prompt_lens = prompt_len_per_seq.clone()
 
     for i in range(output_ids.shape[0]):
-        plen = int(prompt_lens[i].item())
-        # Account for any extra padding in prompt
         orig_prompt_len = expanded_ids.shape[1]
-        comp_ids = output_ids[i, orig_prompt_len:]
+        comp_mask = full_mask[i, orig_prompt_len:].bool()
+        comp_ids = output_ids[i, orig_prompt_len:][comp_mask]
         text = tokenizer.decode(comp_ids, skip_special_tokens=True)
-
-        # Stop strings
-        for stop in ["\n\nQuestion:", "\n\nProblem:", "\n\n\n"]:
-            if stop in text:
-                text = text[:text.index(stop)]
-
         completions.append(text)
 
     # Compute log-probs of the generated sequences under current policy
@@ -228,9 +210,6 @@ def generate_rollouts(
     if profile:
         torch.cuda.nvtx.range_push("rollout_logprobs")
 
-    prompt_lens_tensor = torch.tensor(
-        [expanded_ids.shape[1]] * output_ids.shape[0], device=output_ids.device
-    )
     chunk_size = 2
     old_logprobs_list = []
 
@@ -238,14 +217,11 @@ def generate_rollouts(
         for i in range(0, output_ids.shape[0], chunk_size):
             chunk_ids = output_ids[i:i+chunk_size]
             chunk_mask = full_mask[i:i+chunk_size]
-            chunk_prompt_lens = prompt_lens_tensor[i:i+chunk_size]
-
             chunk_lp = get_per_token_logprobs(model, chunk_ids, chunk_mask)
-            chunk_seq_lp = sequence_logprobs(chunk_lp, chunk_mask, chunk_prompt_lens)
-            old_logprobs_list.append(chunk_seq_lp)
-            del chunk_lp
+            old_logprobs_list.append(chunk_lp)
 
-    old_logprobs = torch.cat(old_logprobs_list, dim=0)
+    old_per_token_logprobs = torch.cat(old_logprobs_list, dim=0)
+    completion_mask = build_completion_mask(full_mask, expanded_ids.shape[1])
 
     if profile:
         torch.cuda.nvtx.range_pop()  # rollout_logprobs
@@ -258,10 +234,9 @@ def generate_rollouts(
     return {
         "full_ids": output_ids,
         "full_mask": full_mask,
-        "prompt_lens": torch.tensor([expanded_ids.shape[1]] * output_ids.shape[0],
-                                     device=output_ids.device),
+        "completion_mask": completion_mask,
         "completions": completions,
-        "old_logprobs": old_logprobs.detach(),
+        "old_per_token_logprobs": old_per_token_logprobs.detach(),
     }
 
 
@@ -343,8 +318,8 @@ def rl_step(
 
     full_ids = rollout_data["full_ids"]
     full_mask = rollout_data["full_mask"]
-    prompt_lens = rollout_data["prompt_lens"]
-    old_logprobs = rollout_data["old_logprobs"]
+    completion_mask = rollout_data["completion_mask"]
+    old_per_token_logprobs = rollout_data["old_per_token_logprobs"]
 
     # Flatten advantages: (B, G) → (B*G,)
     advantages_flat = advantages.reshape(-1).to(device)
@@ -358,9 +333,10 @@ def rl_step(
             policy_model=policy_model,
             input_ids=full_ids,
             attention_mask=full_mask,
-            old_logprobs=old_logprobs,
+            old_per_token_logprobs=old_per_token_logprobs,
             advantages=advantages_flat,
-            prompt_lens=prompt_lens,
+            completion_mask=completion_mask,
+            max_completion_length=config["max_rollout_len"],
             clip_eps=config.get("clip_eps", 0.2),
         )
 
@@ -379,10 +355,13 @@ def rl_step(
 def train(config: dict, profile_mode: bool = False):
     # ---- Distributed setup ----
     dist.init_process_group("nccl")
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    seed = config.get("seed", 42)
+    torch.manual_seed(seed + rank)
+    torch.cuda.manual_seed_all(seed + rank)
 
     # ---- Config parsing ----
     model_name = config["model"]["name"]
@@ -399,6 +378,7 @@ def train(config: dict, profile_mode: bool = False):
     num_prompts = algo_config["num_prompts_per_step"]
     temperature = algo_config["temperature"]
     top_p = algo_config["top_p"]
+    num_iterations = algo_config.get("num_iterations", 1)
 
     log_every = config["logging"]["log_every"]
     save_every = config["logging"]["save_every"]
@@ -414,6 +394,7 @@ def train(config: dict, profile_mode: bool = False):
         print(f"  G={G} | prompts/step={num_prompts} | "
               f"rollouts/step={num_prompts * G}")
         print(f"  max_rollout_len={max_rollout_len} | temp={temperature}")
+        print(f"  policy updates/rollout={num_iterations}")
         print(f"  Steps: {num_steps} | lr: {max_lr}")
         print(f"  Profile: {profile_mode}")
         print(f"{'='*60}")
@@ -425,7 +406,8 @@ def train(config: dict, profile_mode: bool = False):
         )
 
     # ---- Load tokenizer ----
-    tokenizer = load_tokenizer(model_name)
+    model_revision = config["model"].get("revision")
+    tokenizer = load_tokenizer(model_name, revision=model_revision)
 
     # ---- Load policy model (from SFT checkpoint) ----
     policy = load_model(sft_checkpoint, dtype=torch.bfloat16)
@@ -456,7 +438,29 @@ def train(config: dict, profile_mode: bool = False):
         batch_size=num_prompts,
         num_workers=4,
         distributed=True,
+        max_samples=config["data"].get("max_samples", 0),
+        max_prompt_len=config["data"].get("max_prompt_len", 256),
+        seed=seed,
+        revision=config["data"].get("revision"),
     )
+
+    if rank == 0:
+        dataset = dataloader.dataset
+        manifest = {
+            "dataset": config["data"]["dataset"],
+            "split": config["data"]["split"],
+            "revision": config["data"].get("revision"),
+            "fingerprint": dataset.dataset_fingerprint,
+            "source_size": dataset.source_size,
+            "selected_size": len(dataset.sample_indices),
+            "usable_size": len(dataset),
+            "seed": seed,
+            "sample_indices": dataset.sample_indices,
+            "usable_sample_indices": dataset.usable_sample_indices,
+        }
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(output_dir) / "dataset_manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
 
     # ---- Profiling ----
     profiler = ProfilerControl(
@@ -514,29 +518,28 @@ def train(config: dict, profile_mode: bool = False):
             completions=rollout_data["completions"],
             raw_answers=raw_answers,
             G=G,
-            dataset="gsm8k",
+            dataset=config["data"].get("reward_dataset", "gsm8k"),
             profile=profile_mode,
         )
 
         # ---- Policy update ----
-        loss_dict = rl_step(
-            policy_model=policy,
-            rollout_data=rollout_data,
-            rewards=rewards,
-            config=algo_config,
-            profile=profile_mode,
-        )
+        for _ in range(num_iterations):
+            optimizer.zero_grad(set_to_none=True)
+            loss_dict = rl_step(
+                policy_model=policy,
+                rollout_data=rollout_data,
+                rewards=rewards,
+                config=algo_config,
+                profile=profile_mode,
+            )
 
-        if profile_mode:
-            torch.cuda.nvtx.range_push("optimizer_step")
+            if profile_mode:
+                torch.cuda.nvtx.range_push("optimizer_step")
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        if profile_mode:
-            torch.cuda.nvtx.range_pop()  # optimizer_step
-
-        optimizer.zero_grad(set_to_none=True)
+            grad_norm = policy.clip_grad_norm_(1.0)
+            optimizer.step()
+            if profile_mode:
+                torch.cuda.nvtx.range_pop()  # optimizer_step
 
         if profile_mode:
             torch.cuda.nvtx.range_pop()  # dr_grpo_step
@@ -551,6 +554,7 @@ def train(config: dict, profile_mode: bool = False):
                 loss=loss_dict["loss"].item(),
                 surrogate_loss=loss_dict["surrogate_loss"].item(),
                 ratio_mean=loss_dict["ratio_mean"].item(),
+                clipped_fraction=loss_dict["clipped_fraction"].item(),
                 reward_mean=reward_mean,
                 reward_std=reward_std,
                 lr=lr,
@@ -567,6 +571,7 @@ def train(config: dict, profile_mode: bool = False):
                 "loss": loss_dict["loss"].item(),
                 "surrogate_loss": loss_dict["surrogate_loss"].item(),
                 "ratio_mean": loss_dict["ratio_mean"].item(),
+                "clipped_fraction": loss_dict["clipped_fraction"].item(),
                 "reward/mean": reward_mean,
                 "reward/std": reward_std,
                 "lr": lr,
@@ -580,13 +585,14 @@ def train(config: dict, profile_mode: bool = False):
                 tracker.log(step, prefix="DR_GRPO")
 
         # ---- Checkpointing ----
-        if (step + 1) % save_every == 0:
+        if (step + 1) % save_every == 0 and step + 1 < num_steps:
             if rank == 0:
                 print(f"\n[Step {step}] Saving checkpoint...")
             save_hf_checkpoint(
                 model=policy, tokenizer=tokenizer,
                 step=step + 1, output_dir=output_dir,
                 model_name=model_name, rank=rank,
+                model_revision=model_revision,
             )
 
         dist.barrier()
@@ -596,6 +602,7 @@ def train(config: dict, profile_mode: bool = False):
         model=policy, tokenizer=tokenizer,
         step=num_steps, output_dir=output_dir + "/final",
         model_name=model_name, rank=rank,
+        model_revision=model_revision,
     )
 
     profiler.stop()
@@ -610,7 +617,9 @@ def train(config: dict, profile_mode: bool = False):
             gpus=gpu_memory,
             extra={
                 "model": model_name,
+                "model_revision": model_revision,
                 "sft_checkpoint": sft_checkpoint,
+                "dataset_revision": config["data"].get("revision"),
                 "group_size": G,
                 "max_rollout_len": max_rollout_len,
                 "num_prompts_per_step": num_prompts,

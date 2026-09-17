@@ -5,3 +5,4 @@ datasets>=2.16.0
 wandb>=0.16.0
 pyyaml>=6.0
 tqdm>=4.66.0
+math-verify[antlr4_13_2]>=0.8.0
